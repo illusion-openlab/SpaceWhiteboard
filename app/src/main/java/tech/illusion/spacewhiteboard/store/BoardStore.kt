@@ -2,7 +2,6 @@ package tech.illusion.spacewhiteboard.store
 
 import tech.illusion.spacewhiteboard.board.BoardCodec
 import tech.illusion.spacewhiteboard.board.BoardDoc
-import tech.illusion.spacewhiteboard.board.CodecException
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -41,23 +40,25 @@ class BoardStore(private val file: File) {
 
         val text = try {
             file.readText(Charsets.UTF_8)
-        } catch (e: IOException) {
-            return LoadResult.Corrupt(null, "read failed: " + e.message)
+        } catch (e: Exception) {
+            // 启动路径绝不能因为任何异常（不止 IOException）而崩溃：
+            // 宁可报告一份"损坏"，也不能让整个应用起不来。
+            return LoadResult.Corrupt(null, "read failed: ${e::class.java.simpleName}: ${e.message}")
         }
 
         return try {
             val r = BoardCodec.decode(text)
             LoadResult.Ok(r.doc, r.skippedLines)
-        } catch (e: CodecException) {
+        } catch (e: Exception) {
             // 绝不删除或覆盖原文件：静默清空等于把"损坏"升级成"永久丢失"
             val backup = File(file.parentFile, file.name + CORRUPT_SUFFIX)
             val backupPath = try {
                 file.copyTo(backup, overwrite = true)
                 backup.path
-            } catch (io: IOException) {
+            } catch (io: Exception) {
                 null
             }
-            LoadResult.Corrupt(backupPath, e.message ?: "decode failed")
+            LoadResult.Corrupt(backupPath, "${e::class.java.simpleName}: ${e.message ?: "decode failed"}")
         }
     }
 

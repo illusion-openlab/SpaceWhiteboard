@@ -119,4 +119,25 @@ class BoardStoreTest {
         assertEquals(2, (r as LoadResult.Ok).doc.items.size)
         assertFalse(staleTmp.exists())
     }
+
+    // --- Fix round 1 guard test ---
+    // load() now catches Exception (not just IOException/CodecException) so a broken decode
+    // can never crash the app's startup path. Broadening the catch risks masking a genuine
+    // code bug as "corrupt file", so the reason string must carry the exception's class name.
+    // This pins that diagnosability requirement using a genuinely malformed file (the same
+    // kind that already exercises the decode-failure path in the brief's corruption test).
+    @Test
+    fun `corrupt file reason includes the exception class name for diagnosability`() {
+        val dir = tmp.newFolder("boards")
+        val f = File(dir, "main.wbd")
+        f.writeText("this is not a whiteboard file at all")
+
+        val r = BoardStore(f).load()
+        assertTrue(r is LoadResult.Corrupt)
+        val reason = (r as LoadResult.Corrupt).reason
+        assertTrue(
+            "reason should mention the exception class name, was: $reason",
+            reason.contains("CodecException"),
+        )
+    }
 }
