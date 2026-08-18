@@ -101,6 +101,7 @@ class BoardCodecTest {
         val d = BoardDoc()
             .add(Stroke(ItemId(1), 0xFF3366CC.toInt(), 1f, listOf(Pt(0f, 0f), Pt(1f, 1f))))
             .add(ShapeItem(ItemId(2), ShapeKind.Rect, 0x80123456.toInt(), 1f, Pt(0f, 0f), Pt(1f, 1f)))
+            .add(Stroke(ItemId(3), 0x0A112233.toInt(), 1f, listOf(Pt(2f, 2f), Pt(3f, 3f))))
 
         val out = BoardCodec.decode(BoardCodec.encode(d))
         assertEquals(0, out.skippedLines)
@@ -110,6 +111,11 @@ class BoardCodecTest {
 
         val h = out.doc.items[1] as ShapeItem
         assertEquals(0x80123456.toInt(), h.colorArgb)
+
+        // Leading zero nibble: guards against hex() dropping zero-padding
+        // (e.g. a "simplification" to Integer.toHexString(argb)).
+        val z = out.doc.items[2] as Stroke
+        assertEquals(0x0A112233.toInt(), z.colorArgb)
     }
 
     @Test
