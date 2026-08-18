@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <uses-permission android:name="com.picovr.permission.HAND_TRACKING" />
+
         <application
         android:name=".platform.SpatialApplication"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -16,6 +18,7 @@
         <activity
             android:name=".platform.LaunchActivity"
             android:exported="true"
+            android:configChanges="screenLayout|screenSize|smallestScreenSize|orientation"
             android:theme="@style/Theme.SpaceWhiteboardTheme">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -25,7 +28,7 @@
             <!-- Planar DefaultWindowContainer Configuration -->
 
             <!-- The unique name/id of a WindowContainer -->
-            <meta-data android:name="pico.spatial.windowcontainer.id" android:value="YourPlanarWindowContainer"/>
+            <meta-data android:name="pico.spatial.windowcontainer.id" android:value="SpaceWhiteboardWindow"/>
 
             <!-- Form/style of the WindowContainer
                 "0": Form.Automatic, a system default setting, set to Form.Planar currently (default)
@@ -39,7 +42,7 @@
             <!-- Default size of the WindowContainer
                  "[width]x[height]", uses dp as the unit unless specified otherwise
              -->
-            <meta-data android:name="pico.spatial.windowcontainer.defaultsize" android:value="1080x640" />
+            <meta-data android:name="pico.spatial.windowcontainer.defaultsize" android:value="1280x800" />
 
             <!-- Unit of default size for the WindowContainer
                  "dp" — uses density-independent pixels (default)
@@ -81,10 +84,16 @@
                 "0": false, no material background
                 "1": true, uses Material.Regular as the background (default)
              -->
+            <!-- 0 = turn off the system adaptive glass background: this app draws its own
+                 opaque background using the fixed color scheme (design-contract.md §1/§8) -->
             <meta-data
                 android:name="pico.spatial.windowcontainer.materialbackground"
-                android:value="1"/>
+                android:value="0"/>
         </activity>
+
+        <!-- Enable SpatialUI's own logging during development; without it, SpatialUI
+             silently drops its own errors -->
+        <meta-data android:name="pico.spatial.ui.Logger" android:value="1" />
 
         <meta-data android:name="icon.3d.list" android:resource="@array/icon_3d_list" />
         <meta-data android:name="icon.sdf.list" android:resource="@array/icon_sdf_list" />
