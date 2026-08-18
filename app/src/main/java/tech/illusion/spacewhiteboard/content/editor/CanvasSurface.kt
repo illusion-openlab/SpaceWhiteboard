@@ -33,15 +33,24 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
     Canvas(
         modifier = modifier
             .background(Color(0xFFFFFFFF))   // 纸面色，Task 15 换成主题里的 fillTertiary
-            // 手势回调里的每个字段读取都是 state.<field>，在调用时求值，不按值捕获 ——
-            // 加 state.tool / shapeKind / colorArgb / widthDp 进 key 只会在这些值变化时
-            // 取消重启协程（且不会触发 onDragCancel），可能扔下半成品 livePoints/liveShapeStart
-            // 却没有纯粹坏处；因此固定用 Unit，手势协程只创建一次。
+            // 手势回调里原先每个字段读取都是 state.<field>，在调用时求值 ——
+            // 但这意味着工具/颜色/宽度在拖拽进行中被切换时，onDragStart 与 onDragEnd/onDrag
+            // 可能读到不同的 state.tool，导致 start 按 Pen 建立 livePoints、end 却按 Shape 分派，
+            // 委托进 Shape 分支发现 liveShapeStart 为空、什么都不提交，也从不清空 livePoints，
+            // 留下一条永久重绘的幽灵墨迹。手势的语义应该是"这一笔归属于按下时选中的工具/样式"，
+            // 所以在 onDragStart 里把 tool/shapeKind/colorArgb/widthDp 锁存进下面这些局部变量，
+            // 其余回调只读锁存值，不再读 state.tool 等实时字段。
+            // 这也是 pointerInput 必须留 Unit 作 key 的另一个理由：Key 变化会重建协程、
+            // 把这些局部变量重新初始化为默认值，等于把"锁存"整个作废。
             .pointerInput(Unit) {
                 // 累加游标，屏幕像素空间。
                 // 只在 onDragStart 读一次绝对 offset，之后全靠累加 dragAmount ——
                 // PICO 的注视+捏合交互里，拖拽中重读绝对坐标反映的是几乎不动的注视点，不是手的位移。
                 var cursorPx = Offset.Zero
+                var activeTool: Tool? = null   // null = 当前没有手势在进行
+                var activeShape = ShapeKind.Line
+                var activeColor = 0
+                var activeWidth = 0f
 
                 detectSpatialDragGesture(
                     context = context,
@@ -50,25 +59,27 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                         // 这里只取 x/y 落回 2D 屏幕像素坐标。
                         cursorPx = Offset(offset.x, offset.y)
                         val p = state.viewport.toBoard(offset.x / density, offset.y / density)
-                        // 绑定成 val 强制 when 处于表达式上下文：少写一个 Tool 分支会让这里编译不过，
-                        // 而不是悄悄什么都不做——新增枚举值不会被静默继承成 Pen/Shape 行为。
-                        val dispatched: Unit = when (state.tool) {
+                        activeTool = state.tool
+                        activeShape = state.shapeKind
+                        activeColor = state.colorArgb
+                        activeWidth = state.widthDp
+                        when (activeTool) {
                             Tool.Pen -> state.livePoints = listOf(p)
                             Tool.Shape -> {
                                 state.liveShapeStart = p
                                 state.liveShapeEnd = p
                             }
-                            Tool.Eraser, Tool.Pan -> Unit
+                            Tool.Eraser, Tool.Pan, null -> Unit
                         }
                     },
                     onDragEnd = { _ ->
-                        val dispatched: Unit = when (state.tool) {
+                        when (activeTool) {
                             Tool.Pen -> {
                                 val pts = state.livePoints
                                 state.livePoints = emptyList()
                                 if (pts.isNotEmpty()) {
-                                    state.commit(AddItem(Stroke(state.newId(), state.colorArgb, state.widthDp, pts)))
-                                } else Unit
+                                    state.commit(AddItem(Stroke(state.newId(), activeColor, activeWidth, pts)))
+                                }
                             }
                             Tool.Shape -> {
                                 val a = state.liveShapeStart
@@ -78,29 +89,31 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                                 // 起点终点几乎重合视为误触，不产生一个看不见的零尺寸形状
                                 if (a != null && b != null && a.distanceTo(b) > MIN_SHAPE_SIZE) {
                                     state.commit(AddItem(
-                                        ShapeItem(state.newId(), state.shapeKind, state.colorArgb, state.widthDp, a, b)
+                                        ShapeItem(state.newId(), activeShape, activeColor, activeWidth, a, b)
                                     ))
-                                } else Unit
+                                }
                             }
-                            Tool.Eraser, Tool.Pan -> Unit
+                            Tool.Eraser, Tool.Pan, null -> Unit
                         }
+                        activeTool = null
                     },
                     onDragCancel = { _ ->
                         state.livePoints = emptyList()
                         state.liveShapeStart = null
                         state.liveShapeEnd = null
+                        activeTool = null
                     },
                 ) { value ->
                     cursorPx = Offset(cursorPx.x + value.dragAmount.x, cursorPx.y + value.dragAmount.y)
                     val p = state.viewport.toBoard(cursorPx.x / density, cursorPx.y / density)
-                    val dispatched: Unit = when (state.tool) {
+                    when (activeTool) {
                         Tool.Pen -> if (state.livePoints.isNotEmpty() &&
                             p.distanceTo(state.livePoints.last()) > MIN_STEP
                         ) {
                             state.livePoints = state.livePoints + p
-                        } else Unit
-                        Tool.Shape -> if (state.liveShapeStart != null) state.liveShapeEnd = p else Unit
-                        Tool.Eraser, Tool.Pan -> Unit
+                        }
+                        Tool.Shape -> if (state.liveShapeStart != null) state.liveShapeEnd = p
+                        Tool.Eraser, Tool.Pan, null -> Unit
                     }
                 }
             },
