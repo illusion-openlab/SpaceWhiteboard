@@ -54,8 +54,13 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                 var activeShape = ShapeKind.Line
                 var activeColor = 0
                 var activeWidth = 0f
-                /** 本次擦除动作累积命中的对象；松手时整批作为一个 Op 提交。 */
-                val erasedThisDrag = mutableListOf<IndexedItem>()
+                /** 本次擦除动作累积命中的对象（原始 Item，不带 index）；松手时整批作为一个 Op 提交。 */
+                val erasedThisDrag = mutableListOf<Item>()
+                /** 本次擦除拖拽开始前的文档快照——固定基准，用来在 finishEraseBatch 里换算每个
+                 *  命中对象「删除前」的原始 index；不能用拖拽途中不断收缩的 live doc 当基准，
+                 *  否则同一批里越晚命中的条目 index 会偏低，undo 插回时把图层顺序打乱。
+                 *  BoardDoc 不可变，持有这个引用不产生额外拷贝开销。 */
+                var eraseBaseline: BoardDoc? = null
 
                 detectSpatialDragGesture(
                     context = context,
@@ -74,7 +79,11 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                                 state.liveShapeStart = p
                                 state.liveShapeEnd = p
                             }
-                            Tool.Eraser -> { erasedThisDrag.clear(); eraseAt(state, p, erasedThisDrag) }
+                            Tool.Eraser -> {
+                                eraseBaseline = state.doc
+                                erasedThisDrag.clear()
+                                eraseAt(state, p, erasedThisDrag)
+                            }
                             Tool.Pan, null -> Unit
                         }
                     },
@@ -99,7 +108,10 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                                     ))
                                 }
                             }
-                            Tool.Eraser -> finishEraseBatch(state, erasedThisDrag)
+                            Tool.Eraser -> {
+                                finishEraseBatch(state, eraseBaseline, erasedThisDrag)
+                                eraseBaseline = null
+                            }
                             Tool.Pan, null -> Unit
                         }
                         activeTool = null
@@ -112,7 +124,8 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                         // 橡皮不同：拖拽途中已经把命中对象从 doc 里即时移除了（见 eraseAt），
                         // 取消手势不能让这些移除变成"改过文档、却没有对应撤销记录"的既成事实——
                         // 用户看到消失的东西已经消失，那就必须能撤销，所以取消与正常松手走同一条路径。
-                        finishEraseBatch(state, erasedThisDrag)
+                        finishEraseBatch(state, eraseBaseline, erasedThisDrag)
+                        eraseBaseline = null
                         activeTool = null
                     },
                 ) { value ->
@@ -153,10 +166,10 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
  * 它就从 doc.items 里消失，同一次拖拽后续的采样点即使扫过同一位置也再命中不到它，
  * 所以这里不需要额外的去重逻辑。
  */
-private fun eraseAt(state: EditorState, p: Pt, acc: MutableList<IndexedItem>) {
+private fun eraseAt(state: EditorState, p: Pt, acc: MutableList<Item>) {
     val hits = HitTest.eraseHits(state.doc, p, ERASER_RADIUS)
     if (hits.isEmpty()) return
-    acc += hits
+    acc += hits.map { it.item }
     state.removeWithoutUndo(hits.map { it.item.id }.toSet())
 }
 
@@ -165,10 +178,17 @@ private fun eraseAt(state: EditorState, p: Pt, acc: MutableList<IndexedItem>) {
  * 不再 applyTo），命中为空就什么都不做——一个"什么都没发生"的撤销条目比没有条目更糟。
  * 无论走 onDragEnd 还是 onDragCancel，这一步都必须做，因为擦除已经在拖拽途中把命中对象
  * 从文档里即时移除了；两条路径共用同一个函数，避免各自维护一份而逐渐走样。
+ *
+ * 每个条目的 index 从 [baseline]——本次拖拽开始前的文档快照——里换算，而不是从命中时的
+ * live doc 里取：拖拽途中 eraseAt 每命中一次，live doc 就整体收缩一次，用它当场记下的
+ * index 只对"那一刻"成立，同一批里混用不同时刻的 index 会让 insertAll 插回的顺序错乱
+ * （两个条目都可能落到同一个 shift 后的位置）。所有条目相对同一份 baseline 换算，
+ * 就都在同一个坐标系里，insertAll 才能精确还原原始 z 序。
  */
-private fun finishEraseBatch(state: EditorState, acc: MutableList<IndexedItem>) {
-    if (acc.isNotEmpty()) {
-        state.pushEraseBatch(acc.toList())
-        acc.clear()
-    }
+private fun finishEraseBatch(state: EditorState, baseline: BoardDoc?, acc: MutableList<Item>) {
+    if (acc.isEmpty()) return
+    val base = baseline ?: return   // 不会发生：acc 非空意味着 onDragStart 已经设置过 baseline
+    val entries = acc.map { item -> IndexedItem(base.items.indexOfFirst { it.id == item.id }, item) }
+    state.pushEraseBatch(entries)
+    acc.clear()
 }
