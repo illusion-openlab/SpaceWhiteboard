@@ -60,6 +60,22 @@ class EditorState(initialDoc: BoardDoc, initialNextId: Long) {
     fun undo() { doc = undoStack.undo(doc); afterMutation() }
     fun redo() { doc = undoStack.redo(doc); afterMutation() }
 
+    /**
+     * 擦除途中的即时移除：改文档但不入撤销栈。
+     * 配套的 [pushEraseBatch] 在松手时一次性把整批入栈 —— 这样一次擦除只对应一次撤销。
+     */
+    fun removeWithoutUndo(ids: Set<ItemId>) {
+        doc = doc.removeIds(ids).first
+        revision++
+    }
+
+    /** 把一次擦除动作累积的全部命中作为单个 Op 入栈（文档已经改过了，这里只记账，不再 applyTo）。 */
+    fun pushEraseBatch(entries: List<IndexedItem>) {
+        undoStack.push(RemoveItems(entries))
+        canUndo = undoStack.canUndo
+        canRedo = undoStack.canRedo
+    }
+
     fun clearAll() {
         if (doc.items.isEmpty()) return
         commit(RemoveItems(doc.items.mapIndexed { i, item -> IndexedItem(i, item) }))

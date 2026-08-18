@@ -24,6 +24,9 @@ private const val MIN_STEP = 2.0f
 /** 起点终点距离小于此值视为误触，不生成形状。board units。 */
 private const val MIN_SHAPE_SIZE = 4f
 
+/** 橡皮命中半径，board units。 */
+private const val ERASER_RADIUS = 12f
+
 @Composable
 fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
     val context = LocalContext.current
@@ -51,6 +54,8 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                 var activeShape = ShapeKind.Line
                 var activeColor = 0
                 var activeWidth = 0f
+                /** 本次擦除动作累积命中的对象；松手时整批作为一个 Op 提交。 */
+                val erasedThisDrag = mutableListOf<IndexedItem>()
 
                 detectSpatialDragGesture(
                     context = context,
@@ -69,7 +74,8 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                                 state.liveShapeStart = p
                                 state.liveShapeEnd = p
                             }
-                            Tool.Eraser, Tool.Pan, null -> Unit
+                            Tool.Eraser -> { erasedThisDrag.clear(); eraseAt(state, p, erasedThisDrag) }
+                            Tool.Pan, null -> Unit
                         }
                     },
                     onDragEnd = { _ ->
@@ -93,7 +99,16 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                                     ))
                                 }
                             }
-                            Tool.Eraser, Tool.Pan, null -> Unit
+                            Tool.Eraser -> {
+                                // 注意：擦除已在拖拽途中即时从 doc 移除（为了给出即时反馈），
+                                // 所以这里只补一次入栈，不再 applyTo。命中为空时不入栈——
+                                // 一个"什么都没发生"的撤销条目比没有条目更糟。
+                                if (erasedThisDrag.isNotEmpty()) {
+                                    state.pushEraseBatch(erasedThisDrag.toList())
+                                    erasedThisDrag.clear()
+                                }
+                            }
+                            Tool.Pan, null -> Unit
                         }
                         activeTool = null
                     },
@@ -101,6 +116,7 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                         state.livePoints = emptyList()
                         state.liveShapeStart = null
                         state.liveShapeEnd = null
+                        erasedThisDrag.clear()
                         activeTool = null
                     },
                 ) { value ->
@@ -113,11 +129,18 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                             state.livePoints = state.livePoints + p
                         }
                         Tool.Shape -> if (state.liveShapeStart != null) state.liveShapeEnd = p
-                        Tool.Eraser, Tool.Pan, null -> Unit
+                        Tool.Eraser -> eraseAt(state, p, erasedThisDrag)
+                        Tool.Pan, null -> Unit
                     }
                 }
             },
     ) {
+        // 阈值式清理被擦掉对象留下的失效 Path 缓存条目：只在缓存明显超量时才重建一次存活 key 集合，
+        // 避免在没有擦除发生的常态下每帧都做一次全量 Set 构建。
+        if (pathCache.size > state.doc.items.size * 2) {
+            val alive = state.doc.items.map { it.id }.toSet()
+            pathCache.keys.retainAll(alive)
+        }
         drawBoard(state.doc, state.viewport, density, pathCache)
         drawLiveStroke(state.livePoints, state.colorArgb, state.widthDp, state.viewport, density)
         val sa = state.liveShapeStart
@@ -126,4 +149,17 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
             drawLiveShape(state.shapeKind, sa, sb, state.colorArgb, state.widthDp, state.viewport, density)
         }
     }
+}
+
+/**
+ * 命中的对象立即从文档移除（即时反馈），并记入本次擦除批次 [acc]。
+ * [acc] 与 [EditorState.doc] 天然不会重复记录同一对象：一个对象一旦被移除，
+ * 它就从 doc.items 里消失，同一次拖拽后续的采样点即使扫过同一位置也再命中不到它，
+ * 所以这里不需要额外的去重逻辑。
+ */
+private fun eraseAt(state: EditorState, p: Pt, acc: MutableList<IndexedItem>) {
+    val hits = HitTest.eraseHits(state.doc, p, ERASER_RADIUS)
+    if (hits.isEmpty()) return
+    acc += hits
+    state.removeWithoutUndo(hits.map { it.item.id }.toSet())
 }
