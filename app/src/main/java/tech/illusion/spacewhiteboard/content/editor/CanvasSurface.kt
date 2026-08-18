@@ -7,11 +7,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import com.pico.spatial.ui.design.PicoTheme
 import com.pico.spatial.ui.foundation.gesture.detectSpatialDragGesture
 import tech.illusion.spacewhiteboard.board.*
 
@@ -35,25 +35,27 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
 
     Canvas(
         modifier = modifier
-            .background(Color(0xFFFFFFFF))   // 纸面色，Task 15 换成主题里的 fillTertiary
+            // 纸面色走主题角色。本应用把 fillTertiary 定义成浅色暖白纸面（契约 §8），
+            // 与它在其它项目里"深色面上的半透明浅底"的常见用法相反 —— 别当成写错了改回去。
+            .background(PicoTheme.colorScheme.fillTertiary)
             // 手势回调里原先每个字段读取都是 state.<field>，在调用时求值 ——
             // 但这意味着工具/颜色/宽度在拖拽进行中被切换时，onDragStart 与 onDragEnd/onDrag
             // 可能读到不同的 state.tool，导致 start 按 Pen 建立 livePoints、end 却按 Shape 分派，
             // 委托进 Shape 分支发现 liveShapeStart 为空、什么都不提交，也从不清空 livePoints，
             // 留下一条永久重绘的幽灵墨迹。手势的语义应该是"这一笔归属于按下时选中的工具/样式"，
-            // 所以在 onDragStart 里把 tool/shapeKind/colorArgb/widthDp 锁存进下面这些局部变量，
-            // 其余回调只读锁存值，不再读 state.tool 等实时字段。
+            // 所以 onDragStart 调 state.beginGesture() 把 tool/shapeKind/colorArgb/widthDp
+            // 一次性锁存成一个 ActiveStyle，其余回调只读它，不再读 state.tool 等实时字段。
+            // 锁存值放在 state 里（而不是只放手势协程的局部变量），是因为下面 draw lambda
+            // 里的实时预览也要读同一份 —— 局部变量它读不到，读实时字段又会和提交值分叉。
             // 这也是 pointerInput 必须留 Unit 作 key 的另一个理由：Key 变化会重建协程、
-            // 把这些局部变量重新初始化为默认值，等于把"锁存"整个作废。
+            // 把 active 重新初始化为 null，等于把"锁存"整个作废。
             .pointerInput(Unit) {
                 // 累加游标，屏幕像素空间。
                 // 只在 onDragStart 读一次绝对 offset，之后全靠累加 dragAmount ——
                 // PICO 的注视+捏合交互里，拖拽中重读绝对坐标反映的是几乎不动的注视点，不是手的位移。
                 var cursorPx = Offset.Zero
-                var activeTool: Tool? = null   // null = 当前没有手势在进行
-                var activeShape = ShapeKind.Line
-                var activeColor = 0
-                var activeWidth = 0f
+                /** null = 当前没有手势在进行。锁存值同时存进 state，实时预览读的是同一份。 */
+                var active: ActiveStyle? = null
                 /** 本次擦除动作累积命中的对象（原始 Item，不带 index）；松手时整批作为一个 Op 提交。 */
                 val erasedThisDrag = mutableListOf<Item>()
                 /** 本次擦除拖拽开始前的文档快照——固定基准，用来在 finishEraseBatch 里换算每个
@@ -69,11 +71,9 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                         // 这里只取 x/y 落回 2D 屏幕像素坐标。
                         cursorPx = Offset(offset.x, offset.y)
                         val p = state.viewport.toBoard(offset.x / density, offset.y / density)
-                        activeTool = state.tool
-                        activeShape = state.shapeKind
-                        activeColor = state.colorArgb
-                        activeWidth = state.widthDp
-                        when (activeTool) {
+                        val style = state.beginGesture()
+                        active = style
+                        when (style.tool) {
                             Tool.Pen -> state.livePoints = listOf(p)
                             Tool.Shape -> {
                                 state.liveShapeStart = p
@@ -84,16 +84,19 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                                 erasedThisDrag.clear()
                                 eraseAt(state, p, erasedThisDrag)
                             }
-                            Tool.Pan, null -> Unit
+                            Tool.Pan -> Unit
                         }
                     },
                     onDragEnd = { _ ->
-                        when (activeTool) {
+                        val style = active
+                        when (style?.tool) {
                             Tool.Pen -> {
                                 val pts = state.livePoints
                                 state.livePoints = emptyList()
                                 if (pts.isNotEmpty()) {
-                                    state.commit(AddItem(Stroke(state.newId(), activeColor, activeWidth, pts)))
+                                    state.commit(AddItem(
+                                        Stroke(state.newId(), style.colorArgb, style.widthDp, pts)
+                                    ))
                                 }
                             }
                             Tool.Shape -> {
@@ -103,9 +106,9 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                                 state.liveShapeEnd = null
                                 // 起点终点几乎重合视为误触，不产生一个看不见的零尺寸形状
                                 if (a != null && b != null && a.distanceTo(b) > MIN_SHAPE_SIZE) {
-                                    state.commit(AddItem(
-                                        ShapeItem(state.newId(), activeShape, activeColor, activeWidth, a, b)
-                                    ))
+                                    state.commit(AddItem(ShapeItem(
+                                        state.newId(), style.shapeKind, style.colorArgb, style.widthDp, a, b
+                                    )))
                                 }
                             }
                             Tool.Eraser -> {
@@ -114,7 +117,8 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                             }
                             Tool.Pan, null -> Unit
                         }
-                        activeTool = null
+                        active = null
+                        state.endGesture()
                     },
                     onDragCancel = { _ ->
                         state.livePoints = emptyList()
@@ -126,12 +130,13 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                         // 用户看到消失的东西已经消失，那就必须能撤销，所以取消与正常松手走同一条路径。
                         finishEraseBatch(state, eraseBaseline, erasedThisDrag)
                         eraseBaseline = null
-                        activeTool = null
+                        active = null
+                        state.endGesture()
                     },
                 ) { value ->
                     cursorPx = Offset(cursorPx.x + value.dragAmount.x, cursorPx.y + value.dragAmount.y)
                     val p = state.viewport.toBoard(cursorPx.x / density, cursorPx.y / density)
-                    when (activeTool) {
+                    when (active?.tool) {
                         Tool.Pen -> if (state.livePoints.isNotEmpty() &&
                             p.distanceTo(state.livePoints.last()) > MIN_STEP
                         ) {
@@ -151,11 +156,17 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
             pathCache.keys.retainAll(alive)
         }
         drawBoard(state.doc, state.viewport, density, pathCache)
-        drawLiveStroke(state.livePoints, state.colorArgb, state.widthDp, state.viewport, density)
+        // 预览一律读 live* 派生属性：手势进行中它们返回 onDragStart 锁存的那一份样式，
+        // 与 onDragEnd 提交用的是同一个 ActiveStyle 实例。工具栏做出来之后这条很要紧 ——
+        // 另一根手指完全可以在拖拽途中换颜色，那时读 state.colorArgb 会让预览和落笔不一致。
+        drawLiveStroke(state.livePoints, state.liveColorArgb, state.liveWidthDp, state.viewport, density)
         val sa = state.liveShapeStart
         val sb = state.liveShapeEnd
         if (sa != null && sb != null) {
-            drawLiveShape(state.shapeKind, sa, sb, state.colorArgb, state.widthDp, state.viewport, density)
+            drawLiveShape(
+                state.liveShapeKind, sa, sb,
+                state.liveColorArgb, state.liveWidthDp, state.viewport, density,
+            )
         }
     }
 }
