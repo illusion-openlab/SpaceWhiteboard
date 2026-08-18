@@ -99,15 +99,7 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                                     ))
                                 }
                             }
-                            Tool.Eraser -> {
-                                // 注意：擦除已在拖拽途中即时从 doc 移除（为了给出即时反馈），
-                                // 所以这里只补一次入栈，不再 applyTo。命中为空时不入栈——
-                                // 一个"什么都没发生"的撤销条目比没有条目更糟。
-                                if (erasedThisDrag.isNotEmpty()) {
-                                    state.pushEraseBatch(erasedThisDrag.toList())
-                                    erasedThisDrag.clear()
-                                }
-                            }
+                            Tool.Eraser -> finishEraseBatch(state, erasedThisDrag)
                             Tool.Pan, null -> Unit
                         }
                         activeTool = null
@@ -116,7 +108,11 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                         state.livePoints = emptyList()
                         state.liveShapeStart = null
                         state.liveShapeEnd = null
-                        erasedThisDrag.clear()
+                        // 笔/形状在提交前从不改动 doc，取消时丢弃 live 缓冲即可，没有数据要抢救。
+                        // 橡皮不同：拖拽途中已经把命中对象从 doc 里即时移除了（见 eraseAt），
+                        // 取消手势不能让这些移除变成"改过文档、却没有对应撤销记录"的既成事实——
+                        // 用户看到消失的东西已经消失，那就必须能撤销，所以取消与正常松手走同一条路径。
+                        finishEraseBatch(state, erasedThisDrag)
                         activeTool = null
                     },
                 ) { value ->
@@ -162,4 +158,17 @@ private fun eraseAt(state: EditorState, p: Pt, acc: MutableList<IndexedItem>) {
     if (hits.isEmpty()) return
     acc += hits
     state.removeWithoutUndo(hits.map { it.item.id }.toSet())
+}
+
+/**
+ * 收尾一次擦除批次：命中过就整批入栈成一个 [RemoveItems] Op（文档已经改过了，这里只记账，
+ * 不再 applyTo），命中为空就什么都不做——一个"什么都没发生"的撤销条目比没有条目更糟。
+ * 无论走 onDragEnd 还是 onDragCancel，这一步都必须做，因为擦除已经在拖拽途中把命中对象
+ * 从文档里即时移除了；两条路径共用同一个函数，避免各自维护一份而逐渐走样。
+ */
+private fun finishEraseBatch(state: EditorState, acc: MutableList<IndexedItem>) {
+    if (acc.isNotEmpty()) {
+        state.pushEraseBatch(acc.toList())
+        acc.clear()
+    }
 }
