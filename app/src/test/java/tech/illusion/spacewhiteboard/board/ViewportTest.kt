@@ -61,4 +61,40 @@ class ViewportTest {
         assertEquals(600f, v.offsetX, 1e-3f)
         assertEquals(0f, v.offsetY, 1e-3f)
     }
+
+    @Test
+    fun `zoomAround keeps anchor invariant even when zoom is clamped to MAX_SCALE`() {
+        // Start with non-zero offset and non-1.0 scale
+        val v = Viewport(offsetX = 50f, offsetY = 75f, scale = 2f)
+        val anchorX = 500f
+        val anchorY = 400f
+        val before = v.toBoard(anchorX, anchorY)
+        // Zoom far past MAX_SCALE -> will be clamped to 4.0
+        val after = v.zoomAround(100f, anchorX, anchorY).toBoard(anchorX, anchorY)
+        assertEquals(before.x, after.x, 1e-3f)
+        assertEquals(before.y, after.y, 1e-3f)
+    }
+
+    @Test
+    fun `zoomAround keeps anchor invariant even when zoom is clamped to MIN_SCALE`() {
+        // Start with non-zero offset and non-1.0 scale
+        val v = Viewport(offsetX = 50f, offsetY = 75f, scale = 2f)
+        val anchorX = 500f
+        val anchorY = 400f
+        val before = v.toBoard(anchorX, anchorY)
+        // Zoom far past MIN_SCALE -> will be clamped to 0.5
+        val after = v.zoomAround(0.001f, anchorX, anchorY).toBoard(anchorX, anchorY)
+        assertEquals(before.x, after.x, 1e-3f)
+        assertEquals(before.y, after.y, 1e-3f)
+    }
+
+    @Test
+    fun `fit with width-constrained letterboxing centers canvas vertically`() {
+        // 视口 1600x3200，画布 2400x1600 -> 宽度受限 -> scale = 1600/2400 = 2/3，垂直居中
+        val v = Viewport.fit(viewW = 1600f, viewH = 3200f)
+        assertEquals(2f / 3f, v.scale, 1e-4f)
+        assertEquals(0f, v.offsetX, 1e-3f)
+        val expectedOffsetY = (3200f - 1600f * (2f / 3f)) / 2f
+        assertEquals(expectedOffsetY, v.offsetY, 1e-3f)
+    }
 }
