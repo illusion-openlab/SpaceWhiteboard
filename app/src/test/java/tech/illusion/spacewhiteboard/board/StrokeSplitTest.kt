@@ -47,9 +47,12 @@ class StrokeSplitTest {
 
     @Test
     fun `the boundary is inclusive so a point exactly at radius is erased`() {
-        val out = StrokeSplit.split(listOf(Pt(0f,0f), Pt(10f,0f), Pt(20f,0f)), Pt(10f, 0f), 10f)
-        // 三个点到圆心距离分别是 10、0、10，全部 <= 10，全被擦掉
-        assertTrue(out.isEmpty())
+        val out = StrokeSplit.split(listOf(Pt(0f,0f), Pt(10f,0f), Pt(20f,0f), Pt(30f,0f)), Pt(25f, 0f), 5f)
+        // 四个点到圆心距离分别是 25、15、5、5
+        // 正确的 <=：距离 5 的点被擦掉，只剩 [(0,0), (10,0)]
+        // 若错误的 < 则全部保留 [(0,0), (10,0), (20,0), (30,0)]
+        assertEquals(1, out.size)
+        assertEquals(listOf(Pt(0f, 0f), Pt(10f, 0f)), out[0])
     }
 
     @Test
