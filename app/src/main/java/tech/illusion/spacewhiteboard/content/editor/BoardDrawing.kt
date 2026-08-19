@@ -162,6 +162,43 @@ private fun DrawScope.drawShapeGeometry(
 private fun inkStyle(widthDp: Float) =
     StrokeStyle(width = widthDp, cap = StrokeCap.Round, join = StrokeJoin.Round)
 
+/** 笔尖游标的环形描边宽度，board units，跟当前笔宽无关——环本身要细，撑起环的直径才随笔宽变。 */
+private const val PEN_CURSOR_RING_STROKE = 1.5f
+
+/**
+ * 笔尖游标（Task 19 修复轮）：只在屏幕渲染路径调用，从不并入 [drawBoard]——
+ * 游标不是文档内容，PNG 导出（`export.BoardRenderer`）只调 [drawBoard]，天然看不到它，
+ * 不需要额外开关去把它排除在导出之外。
+ *
+ * 画成空心细环、直径等于当前笔宽，而不是实心点：实心点在浅色纸面上很容易被误认成刚落下
+ * 的一个墨点（尤其笔宽档位选到最细的 2dp 时），环形不会与真正的墨迹形状混淆，同时环的
+ * 直径如实预告"落这一笔会有多粗"。颜色取 [WhiteboardColorScheme] 的 `interaction` 角色
+ * （契约里专门给交互反馈用的强调色，不是画笔调色板里的任何一色），在暖白纸面和深色根背景
+ * 上都压得住对比度，不额外引入新的颜色字面量。跟墨迹一样先 `withTransform` 再
+ * [clipToPaper]——游标本身也不该画到纸面之外。
+ */
+fun DrawScope.drawPenCursor(
+    pos: Pt,
+    widthDp: Float,
+    color: Color,
+    viewport: Viewport,
+    density: Float,
+) {
+    withTransform({
+        translate(viewport.offsetX * density, viewport.offsetY * density)
+        scale(viewport.scale * density, viewport.scale * density, pivot = Offset.Zero)
+    }) {
+        clipToPaper {
+            drawCircle(
+                color = color,
+                radius = widthDp / 2f,
+                center = Offset(pos.x, pos.y),
+                style = StrokeStyle(width = PEN_CURSOR_RING_STROKE, cap = StrokeCap.Round),
+            )
+        }
+    }
+}
+
 /** 二次贝塞尔中点法建路径，坐标全在 board units，因此与视口无关、可缓存。 */
 private fun buildStrokePath(points: List<Pt>): Path {
     val sp = StrokeSmoothing.smooth(points) ?: return Path()

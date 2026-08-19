@@ -4,6 +4,7 @@ import android.util.Log
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -17,9 +18,23 @@ import tech.illusion.spacewhiteboard.board.*
 
 private const val TAG = "SpaceWhiteboard"
 
-/** 采样距离过滤，board units。手停住时驱动层仍持续下发事件，不过滤会塞进几千个重复点。
- *  初值 2.0 是保守起步值，Task 19 用真机实测数据校准。 */
-private const val MIN_STEP = 2.0f
+/**
+ * 采样距离过滤，**屏幕像素空间**（不是 board units）：与上一个被接受样本的屏幕像素位置
+ * 比较，只在这个空间比才对——"手是不是基本没动"是屏幕空间的概念，跟当前缩放倍数无关。
+ * 旧版在换算到 board units 之后才比较（等价于用同一个屏幕像素阈值除以 viewport.scale），
+ * 于是同样的物理手部位移，缩放倍数越高换算出的 board 距离越小：50% 缩放时中位步长
+ * 6.06px 换成约 6.06 board units，阈值 2.0 基本不拦；400% 缩放时同样的手部位移只值
+ * ~0.76 board units，大半采样点被当成"没动"丢弃——恰好发生在用户放大想画细节、最需要
+ * 采样密度的时候。这是原计划里的设计错误，不是实现疏漏，所以改法是整个过滤器搬到屏幕
+ * 像素空间，不是"两个空间都卡一遍"。
+ *
+ * 取值依据 Task 19 在 PICO Swan 真机上的实测（2026-08-19，九笔画、1346 个 drag 事件）：
+ * 90Hz 采样，事件间隔中位数 11.10ms（P90 11.49ms、P99 11.90ms，非常规律）；单事件步长
+ * 中位数 6.06px（P90 10.87px、P99 30.54px）。阈值取中位步长的约三分之一（2.0px）：
+ * 落在"中位步长的四分之一到一半"这个安全区间内，既能吞掉手部静止时驱动层仍在下发的
+ * 抖动重复点，又远低于中位数真实移动，每秒 ~90 个真实样本几乎全部保留。
+ */
+private const val MIN_STEP_PX = 2.0f
 
 /** 起点终点距离小于此值视为误触，不生成形状。board units。 */
 private const val MIN_SHAPE_SIZE = 4f
@@ -36,6 +51,14 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
     val density = LocalDensity.current.density
     val scheme = PicoTheme.colorScheme
     val pathCache = remember { mutableMapOf<ItemId, Path>() }
+    // 笔尖游标：Pen 拖拽进行中，"系统认为落墨点在哪"（board units）；没有 Pen 拖拽时为
+    // null、不画。用 mutableStateOf 而不是手势协程里的局部变量，原因和 state.livePoints
+    // 一样——下面 Canvas 的 draw lambda 要在另一处读它来画游标，局部变量读不到。
+    // 只做 state 1（拖拽中）：detectSpatialPointerEvent 与 detectSpatialDragGesture 能否
+    // 在同一个元素上稳定共存，SDK 文档/示例里找不到二者同时使用的例子，本轮又不安装到
+    // 设备验证，没法拿到运行时证据；宁可不做 state 2（悬停中）也不要拿"猜的"悬停位置
+    // 糊弄用户——这正是本次要修的那类问题。
+    val dragCursorBoard = remember { mutableStateOf<Pt?>(null) }
 
     Canvas(
         modifier = modifier
@@ -61,6 +84,8 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                 // 只在 onDragStart 读一次绝对 offset，之后全靠累加 dragAmount ——
                 // PICO 的注视+捏合交互里，拖拽中重读绝对坐标反映的是几乎不动的注视点，不是手的位移。
                 var cursorPx = Offset.Zero
+                /** 上一个被采样过滤器接受的样本的屏幕像素位置；Pen 专用，比较基准。 */
+                var lastAcceptedPenPx = Offset.Zero
                 /** null = 当前没有手势在进行。锁存值同时存进 state，实时预览读的是同一份。 */
                 var active: ActiveStyle? = null
                 /** 本次擦除动作累积命中的对象（原始 Item，不带 index）；松手时整批作为一个 Op 提交。 */
@@ -81,7 +106,11 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                         val style = state.beginGesture()
                         active = style
                         when (style.tool) {
-                            Tool.Pen -> state.livePoints = listOf(p)
+                            Tool.Pen -> {
+                                state.livePoints = listOf(p)
+                                lastAcceptedPenPx = cursorPx
+                                dragCursorBoard.value = p
+                            }
                             Tool.Shape -> {
                                 state.liveShapeStart = p
                                 state.liveShapeEnd = p
@@ -124,6 +153,7 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                             }
                             Tool.Pan, null -> Unit
                         }
+                        dragCursorBoard.value = null
                         active = null
                         state.endGesture()
                     },
@@ -131,6 +161,7 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                         state.livePoints = emptyList()
                         state.liveShapeStart = null
                         state.liveShapeEnd = null
+                        dragCursorBoard.value = null
                         // 笔/形状在提交前从不改动 doc，取消时丢弃 live 缓冲即可，没有数据要抢救。
                         // 橡皮不同：拖拽途中已经把命中对象从 doc 里即时移除了（见 eraseAt），
                         // 取消手势不能让这些移除变成"改过文档、却没有对应撤销记录"的既成事实——
@@ -144,10 +175,17 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                     cursorPx = Offset(cursorPx.x + value.dragAmount.x, cursorPx.y + value.dragAmount.y)
                     val p = state.viewport.toBoard(cursorPx.x / density, cursorPx.y / density)
                     when (active?.tool) {
-                        Tool.Pen -> if (state.livePoints.isNotEmpty() &&
-                            p.distanceTo(state.livePoints.last()) > MIN_STEP
-                        ) {
-                            state.livePoints = state.livePoints + p
+                        Tool.Pen -> {
+                            // 游标画的是"系统当下认为笔尖在哪"这个诚实的累计位置，每个事件都更新——
+                            // 不受下面的采样过滤影响：过滤只决定要不要往 livePoints 里多记一个点
+                            // （性能/平滑考虑），游标要如实反映驱动层刚刚汇报的真实位置。
+                            dragCursorBoard.value = p
+                            if (state.livePoints.isNotEmpty() &&
+                                (cursorPx - lastAcceptedPenPx).getDistance() > MIN_STEP_PX
+                            ) {
+                                state.livePoints = state.livePoints + p
+                                lastAcceptedPenPx = cursorPx
+                            }
                         }
                         Tool.Shape -> if (state.liveShapeStart != null) state.liveShapeEnd = p
                         Tool.Eraser -> eraseAt(state, p, erasedThisDrag)
@@ -184,6 +222,10 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                 state.liveShapeKind, sa, sb,
                 state.liveColorArgb, state.liveWidthDp, state.viewport, density,
             )
+        }
+        // 游标最后画，叠在已提交内容和实时预览之上，永远看得见。
+        dragCursorBoard.value?.let { pos ->
+            drawPenCursor(pos, state.liveWidthDp, scheme.interaction, state.viewport, density)
         }
     }
 }
