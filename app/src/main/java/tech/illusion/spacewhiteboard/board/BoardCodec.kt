@@ -12,13 +12,19 @@ data class DecodeResult(val doc: BoardDoc, val skippedLines: Int)
  *  2. org.json 在 JVM 单测里是 stub（调用直接抛异常），而本类恰恰最需要被单测覆盖；
  *  3. 纯字符串处理零依赖、可流式、损坏时易于人工排查。
  *
- * `t` 行（文本）格式：
+ * `t` 行（文本）格式，8 个 token（1b-2 复审加入第 8 个 `eBoard`，`HEADER` 仍是 `wbd1`——
+ * 旧的 7-token `t` 行按 token 数检查直接判定为畸形行，降级为跳过并计数，这正是格式设计好的
+ * 向后兼容路径，不需要升版本号）：
  * ```
- * t <argb8位小写hex> <sizeBoard> <x>,<y> <wBoard> <hBoard> <base64(utf8 text)>
+ * t <argb8位小写hex> <sizeBoard> <x>,<y> <wBoard> <hBoard> <eBoard> <base64(utf8 text)>
  * ```
+ * `wBoard` 是换行约束（喂给测量的 `Constraints.maxWidth`），`eBoard` 是测量出的墨迹宽度
+ * （`TextLayoutResult.size.width`）——两者不是同一个数，`eBoard` 才是 [TextItem.bounds] 用的
+ * 那个宽度，详见 `Item.kt` 的 `TextItem` 类注释。
+ *
  * 空文本的哨兵：base64 编码空字符串会产出空串，而 `decode` 按空格分词并过滤空 token，
  * 于是空文本的 `t` 行会少一个 token、被当成畸形行跳过——用户打开文字输入面板直接确认
- * 就能触发这条路径。为此，文本为空时第 7 个 token 写成单个 `-` 而不是 base64 输出。
+ * 就能触发这条路径。为此，文本为空时最后一个 token 写成单个 `-` 而不是 base64 输出。
  * base64 字母表是 `A-Za-z0-9+/=`，永远不会产出裸 `-`，所以这个哨兵不会与真实编码冲突。
  */
 object BoardCodec {
@@ -50,6 +56,7 @@ object BoardCodec {
                         .append(' ').append(item.anchor.x).append(',').append(item.anchor.y)
                         .append(' ').append(item.wBoard)
                         .append(' ').append(item.hBoard)
+                        .append(' ').append(item.eBoard)
                         .append(' ').append(encodeText(item.text))
                         .append('\n')
                 }
@@ -101,15 +108,18 @@ object BoardCodec {
                 ShapeItem(id, kind, unhex(t[2]), t[3].toFloat(), parsePt(t[4]), parsePt(t[5]))
             }
             "t" -> {
-                if (t.size != 7) return null
+                // 8 个 token；旧的 7-token 行（1b-2 复审加入 eBoard 之前）在这里直接判定为
+                // 畸形行降级跳过——这就是 HEADER 不升版本号也能安全扩展格式的设计。
+                if (t.size != 8) return null
                 TextItem(
                     id = id,
-                    text = decodeText(t[6]),
+                    text = decodeText(t[7]),
                     colorArgb = unhex(t[1]),
                     sizeBoard = t[2].toFloat(),
                     anchor = parsePt(t[3]),
                     wBoard = t[4].toFloat(),
                     hBoard = t[5].toFloat(),
+                    eBoard = t[6].toFloat(),
                 )
             }
             else -> null                                          // 未知前缀（1b 的 i）

@@ -45,12 +45,19 @@ data class ShapeItem(
 /**
  * 画布上的一段文字。
  *
- * [sizeBoard] 与 [wBoard] / [hBoard] 都是**画布单位**，不是 sp/dp —— 白板上的文字是画布内容，
- * 应当随缩放一起变换。用 sp 会让它在屏幕上恒定大小，放大画布时相对内容越来越小。
+ * [sizeBoard] 与 [wBoard] / [hBoard] / [eBoard] 都是**画布单位**，不是 sp/dp —— 白板上的文字是
+ * 画布内容，应当随缩放一起变换。用 sp 会让它在屏幕上恒定大小，放大画布时相对内容越来越小。
  *
- * [wBoard] / [hBoard] 是**创建时由 UI 层测量后存下来的**占位尺寸。`board/` 不能依赖 Compose，
- * 因此无法在这里重新测量。若渲染时的字体度量与创建时不同，存下的尺寸会有偏差；它只用于
- * [bounds]（进而 `contentBounds` 与 PNG 导出裁切），这点偏差可以接受。
+ * **[wBoard] 是换行约束，[eBoard] 是测量出的墨迹宽度，两者不是同一个数**（1b-2 复审修复项）：
+ * [wBoard] 是喂给 `measureTextLayout` 的 `Constraints.maxWidth`——多长该换行；[eBoard] 是那次
+ * 测量算出的 `TextLayoutResult.size.width`——这段文字实际画出来有多宽。旧版把 [wBoard]（一个
+ * 换行约束常量，与文字本身长度无关）直接当作 [bounds] 的宽度用，于是一个四字短文本的导出裁切
+ * 会带着约束常量那么宽的空白纸张，而不是文字本体的宽度。[bounds] 现在读 [eBoard]，短文本的
+ * 包围盒因此正确地贴着墨迹本身，不再被换行约束撑大。
+ *
+ * [wBoard] / [hBoard] / [eBoard] 都是**创建时由 UI 层测量后存下来的**占位尺寸。`board/` 不能依赖
+ * Compose，因此无法在这里重新测量。若渲染时的字体度量与创建时不同，存下的尺寸会有偏差；它们
+ * 只用于 [bounds]（进而 `contentBounds` 与 PNG 导出裁切），这点偏差可以接受。
  */
 data class TextItem(
     override val id: ItemId,
@@ -60,7 +67,8 @@ data class TextItem(
     val anchor: Pt,
     val wBoard: Float,
     val hBoard: Float,
+    val eBoard: Float,
 ) : Item {
     override fun bounds(): BoardRect =
-        BoardRect(anchor.x, anchor.y, anchor.x + wBoard, anchor.y + hBoard)
+        BoardRect(anchor.x, anchor.y, anchor.x + eBoard, anchor.y + hBoard)
 }

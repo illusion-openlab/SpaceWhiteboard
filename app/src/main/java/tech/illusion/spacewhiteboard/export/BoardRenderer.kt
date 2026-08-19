@@ -33,9 +33,13 @@ object BoardRenderer {
      * @param marginBu  内容包围盒外扩多少 board units。
      * @param context   仅用来构造文字渲染所需的 [androidx.compose.ui.text.font.FontFamily.Resolver]
      *   （[createFontFamilyResolver] 要求一个 `Context`）——`drawBoard` 里量 `TextItem` 用
-     *   固定的 `density=1f/fontScale=1f`（见 `BoardDrawing.kt` 的 `TEXT_MEASURE_DENSITY`），
-     *   与这里传入的 `Context` 无关，字体解析结果不会因为调用方传的 `Context` 不同而让导出图
-     *   与屏幕所见分叉。
+     *   固定的 `density=1f/fontScale=1f`（见 `BoardDrawing.kt` 的 `TEXT_MEASURE_DENSITY`）与固定的
+     *   `layoutDirection = LayoutDirection.Ltr`（`measureTextLayout` 内部钉死，1b-2 复审修复项），
+     *   都与这里传入的 `Context` 无关。字体解析器（`fontFamilyResolver`）是这条链路上唯一仍然
+     *   由调用方各自构造的输入：屏幕路径读 `LocalFontFamilyResolver.current`，这里用
+     *   `createFontFamilyResolver(context)`——两个实例不是同一个对象，但本应用没有声明任何自定义
+     *   `FontFamily`（`TextStyle(fontSize = ...)` 从不传 `fontFamily`），两者在同一台设备上解析
+     *   出的都是系统默认字体，实际不会让导出图与屏幕所见分叉。
      * @return 文档为空、或内容整体落在纸面（`[0,CANVAS_W]×[0,CANVAS_H]`）之外因而
      *   裁剪之后什么都不可见时返回 null——两种情况都是"没有可导出的内容"。
      */
@@ -88,8 +92,13 @@ object BoardRenderer {
         // TextMeasurer 本身不参与缩放决策——它的 defaultDensity 只在 drawBoard 内部忘记显式
         // 传 density 时才会被用到，而 drawTextItem 每次都显式传 TEXT_MEASURE_DENSITY 覆盖，
         // 这里传什么 Density 都不影响导出结果，选 Density(1f) 只是跟下面 draw() 的密度取值一致。
+        // `defaultLayoutDirection = LayoutDirection.Ltr` 现在只是保底：measureTextLayout
+        // 自己也钉死了 `layoutDirection = LayoutDirection.Ltr`（1b-2 复审修复项），不再依赖
+        // 这里传的默认值——但仍然显式钉在这里，不留一个"万一以后 measureTextLayout 又漏传
+        // 这一步，这里的默认值刚好还是对的"式的隐性耦合。
+        val fontFamilyResolver = createFontFamilyResolver(context)
         val textMeasurer = TextMeasurer(
-            defaultFontFamilyResolver = createFontFamilyResolver(context),
+            defaultFontFamilyResolver = fontFamilyResolver,
             defaultDensity = Density(1f),
             defaultLayoutDirection = LayoutDirection.Ltr,
         )
@@ -97,7 +106,10 @@ object BoardRenderer {
         CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, canvas, Size(wPx.toFloat(), hPx.toFloat())) {
             // 先铺纸面色，再画内容——没有内容的像素应该是纸，不是透明。
             drawRect(Color(paperArgb))
-            drawBoard(doc, viewport, density = 1f, pathCache = mutableMapOf<ItemId, Path>(), textMeasurer = textMeasurer)
+            drawBoard(
+                doc, viewport, density = 1f, pathCache = mutableMapOf<ItemId, Path>(),
+                textMeasurer = textMeasurer, fontFamilyResolver = fontFamilyResolver,
+            )
         }
         return bitmap
     }

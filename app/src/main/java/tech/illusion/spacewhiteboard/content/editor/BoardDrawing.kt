@@ -17,8 +17,10 @@ import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.sp
 import tech.illusion.spacewhiteboard.board.*
 import kotlin.math.roundToInt
@@ -110,6 +112,7 @@ fun DrawScope.drawBoard(
     density: Float,
     pathCache: MutableMap<ItemId, Path>,
     textMeasurer: TextMeasurer,
+    fontFamilyResolver: FontFamily.Resolver,
 ) {
     withTransform({
         translate(viewport.offsetX * density, viewport.offsetY * density)
@@ -128,7 +131,7 @@ fun DrawScope.drawBoard(
                         }
                     }
                     is ShapeItem -> drawShape(item)
-                    is TextItem -> drawTextItem(item, textMeasurer)
+                    is TextItem -> drawTextItem(item, textMeasurer, fontFamilyResolver)
                 }
             }
         }
@@ -177,25 +180,47 @@ private val TEXT_MEASURE_DENSITY = Density(density = 1f, fontScale = 1f)
  * 临界宽度上）可能让"要不要在这个词处换行"的判定发生变化、从而改变行数与高度——但这个风险
  * 现在也只存在于一处（这个函数内部），两个调用方永远读到同一次 `roundToInt()` 的结果，
  * 不会出现"渲染量出来的换行"与"创建时存进 `hBoard` 的换行"互相打架的情况。
+ *
+ * **`layoutDirection` 钉死 `LayoutDirection.Ltr`，`fontFamilyResolver` 由调用方显式传入
+ * （1b-2 复审修复项）。** 这两个参数以前不在这里的参数列表里，各自沿用调用方传入
+ * [TextMeasurer] 的默认值：屏幕/创建时路径（`CanvasSurface`/`TextInputSheet`）用
+ * `rememberTextMeasurer()`，其 `defaultLayoutDirection` 读的是当前系统区域设置；导出路径
+ * （`export.BoardRenderer`）手动构造 `TextMeasurer` 时钉死了 `LayoutDirection.Ltr`。这意味着
+ * 在 RTL 系统语言下，屏幕排版会按 RTL 走、导出图却永远按 LTR 走——两者不一致，存档的排版结果
+ * 因此是"取决于用户系统语言"的，而不是这份文档自己的属性，恰恰是 `fontScale` 被钉死为 1
+ * 同一类问题（见上文），却在加入这个函数时漏掉的一半。现在跟 `sizeBoard`/`wBoard`/
+ * `TEXT_MEASURE_DENSITY` 一样，把 `layoutDirection` 也收进这个函数体内、对两个调用方都强制
+ * 生效，`measureTextLayout` 的"三个测量输入的唯一来源"这句话才是真的对，不是"基本对，除了
+ * 布局方向偷偷从外面漏进来"。`fontFamilyResolver` 同理需要跨调用方一致，但它没有一个"正确
+ * 常量"可以钉死（分辨字体本身就需要一个真实的 resolver），所以做法不同：显式加一个参数，让
+ * 两个调用方各自传入自己那份 resolver——两处永远显式指定，不再有"读 TextMeasurer 自带默认值"
+ * 这条隐藏路径。
  */
 internal fun measureTextLayout(
     text: String,
     sizeBoard: Float,
     wBoard: Float,
     measurer: TextMeasurer,
+    fontFamilyResolver: FontFamily.Resolver,
 ): TextLayoutResult = measurer.measure(
     text = text,
     style = TextStyle(fontSize = sizeBoard.sp),
     constraints = Constraints(maxWidth = wBoard.roundToInt().coerceAtLeast(1)),
     density = TEXT_MEASURE_DENSITY,
+    layoutDirection = LayoutDirection.Ltr,
+    fontFamilyResolver = fontFamilyResolver,
 )
 
 /**
  * 文字绘制分支（Task 3；Task 4 起测量逻辑收进 [measureTextLayout]，这里只是调用方之一）。
  * 颜色在测量之后才通过 `drawText` 的 `color` 参数施加，不参与布局——见 [measureTextLayout] 的说明。
  */
-private fun DrawScope.drawTextItem(item: TextItem, textMeasurer: TextMeasurer) {
-    val layout = measureTextLayout(item.text, item.sizeBoard, item.wBoard, textMeasurer)
+private fun DrawScope.drawTextItem(
+    item: TextItem,
+    textMeasurer: TextMeasurer,
+    fontFamilyResolver: FontFamily.Resolver,
+) {
+    val layout = measureTextLayout(item.text, item.sizeBoard, item.wBoard, textMeasurer, fontFamilyResolver)
     drawText(layout, color = Color(item.colorArgb), topLeft = Offset(item.anchor.x, item.anchor.y))
 }
 

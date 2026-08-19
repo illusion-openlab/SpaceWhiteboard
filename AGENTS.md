@@ -46,34 +46,48 @@
 
 点画布、系统软键盘打字、确认后文字成为画布内容——随文档一起保存、重启恢复、缩放、导出。
 
-> **用户会立刻撞到的限制，写在最前面：文字目前不可删除单个对象。** 橡皮擦显式忽略 `TextItem`
-> （见下），选择工具要到 **1b-4** 才会出现。本阶段放置的文字，唯一能拿掉它的办法是**撤销**
-> （必须在放置后立刻做，一旦中间夹了别的操作就够不到）或**清空**（整块白板全部清除）。这不是
-> bug，是分期交付的已知代价，交付时必须向用户说清楚，不要含糊过去。
+> **用户会立刻撞到的限制，写在最前面：文字目前不可删除单个对象，也没有字号控制。** 橡皮擦
+> 显式忽略 `TextItem`（见下），选择工具要到 **1b-4** 才会出现。本阶段放置的文字，唯一能拿掉它
+> 的办法是**撤销**（必须在放置后立刻做，一旦中间夹了别的操作就够不到）或**清空**（整块白板
+> 全部清除）。字号也是硬编码常量（`TextInputSheet.kt` 的 `TEXT_SIZE_BOARD = 48f`），没有任何
+> UI 让用户选大小——这个不是遗漏，是故意留到以后：`sizeBoard` 已经是 `t` 行的一个独立字段
+> （见下），以后加字号选择器不需要再动存储格式或做数据迁移。这些都不是 bug，是分期交付的
+> 已知代价，交付时必须向用户说清楚，不要含糊过去。
 
-- **`TextItem`**（`board/Item.kt`）加入 `Item` 密封接口家族，字段：`id`、`text`（原始字符串，
-  未 trim、未转义）、`colorArgb`、`sizeBoard`（字号）、`anchor`（左上角 `Pt`）、`wBoard`（换行
-  宽度）、`hBoard`（测量出的高度）。`bounds()` 直接是 `(anchor.x, anchor.y)` 到
-  `(anchor.x + wBoard, anchor.y + hBoard)` 的矩形，参与 `contentBounds()`（进而 PNG 导出裁切）。
-- **`sizeBoard`/`wBoard`/`hBoard` 全部是画布单位（board units），不是 `sp`。** 这是刻意背离规格
-  原文里 `sizeSp` 措辞的决定：白板上的文字是**画布内容**，跟笔迹/形状一样要随 `viewport.scale`
-  一起缩放——用户放大画布细看时，文字应该跟着墨迹一起变大。如果用 `sp`，文字大小由系统排版
-  管道换算、天生跟屏幕密度绑定、不跟随画布缩放，缩放倍率越高文字相对墨迹越小，读起来会像是
-  文字"缩水"了。`sizeBoard`/`wBoard`/`hBoard` 与 `Stroke.widthDp` 走的是同一套处理方式：都是
+- **`TextItem`**（`board/Item.kt`）加入 `Item` 密封接口家族，字段：`id`、`text`（创建时已
+  `trim()` 过——唯一的生产者 `TextInputSheet.commitText` 在测量/提交前就做了，`board/` 层本身
+  不做二次处理；未转义）、`colorArgb`、`sizeBoard`（字号）、`anchor`（左上角 `Pt`）、`wBoard`
+  （喂给测量的换行约束）、`hBoard`（测量出的高度）、`eBoard`（测量出的墨迹宽度，1b-2 复审
+  加入）。`bounds()` 是 `(anchor.x, anchor.y)` 到 `(anchor.x + eBoard, anchor.y + hBoard)` 的
+  矩形，参与 `contentBounds()`（进而 PNG 导出裁切）——**用的是 `eBoard`，不是 `wBoard`**：
+  `wBoard` 只是换行约束、不是这段文字实际有多宽，早期版本把 `wBoard` 直接当宽度用，短文本会
+  在导出图里带出一大块按换行约束撑开的空白，`eBoard` 就是为了修这个问题才拆出来的独立字段。
+- **`sizeBoard`/`wBoard`/`hBoard`/`eBoard` 全部是画布单位（board units），不是 `sp`。** 这是
+  刻意背离规格原文里 `sizeSp` 措辞的决定：白板上的文字是**画布内容**，跟笔迹/形状一样要随
+  `viewport.scale` 一起缩放——用户放大画布细看时，文字应该跟着墨迹一起变大。如果用 `sp`，
+  文字大小由系统排版管道换算、天生跟屏幕密度绑定、不跟随画布缩放，缩放倍率越高文字相对墨迹
+  越小，读起来会像是文字"缩水"了。这几个字段与 `Stroke.widthDp` 走的是同一套处理方式：都是
   画布单位字面量，只在 `drawBoard` 外层的 `withTransform`（`translate` + `scale`）里被放大一次，
   函数体内部从不再乘 density。
-- **`wBoard`/`hBoard` 是创建时由 UI 层测量后存下来的固定值，`board/` 包本身无法重新测量**——
-  `board/` 零 Compose import（硬不变量之一），量不了字。这意味着一旦存进 `TextItem`，这两个
-  数字就固定了，不会因为设备、字体、或运行时环境不同而"自动纠正"；`measureTextLayout`（见下
-  「`measureTextLayout` 是三个测量输入的唯一来源」一节）因此必须在创建时与渲染时被两个调用方
-  以完全一致的输入调用。
+- **`wBoard`/`hBoard`/`eBoard` 是创建时由 UI 层测量后存下来的固定值，`board/` 包本身无法重新
+  测量**——`board/` 零 Compose import（硬不变量之一），量不了字。这意味着一旦存进 `TextItem`，
+  这几个数字就固定了，不会因为设备、字体、或运行时环境不同而"自动纠正"；`measureTextLayout`
+  （见下「`measureTextLayout` 是三个测量输入的唯一来源」一节）因此必须在创建时与渲染时被两个
+  调用方以完全一致的输入调用。
+- **换行宽度（`wBoard`）不再是固定的 `CANVAS_W / 3`，而是随锚点位置收缩（1b-2 复审修复项）。**
+  `TextInputSheet.kt` 的 `wrapBoardFor(anchorX)` 取「画布宽度三分之一」与「锚点到纸面右边界的
+  剩余空间」中较小的一个，再夹一个下限（`MIN_WRAP_BOARD = 160f`）：旧版不看锚点位置，靠近右
+  边界放置的文字换行永远不会发生，会一路排到纸面外被裁断、且没有办法再挪回来（橡皮擦忽略
+  文字、选择工具还没做）。同一次修复也把落点锚点本身夹进了 `[0, CANVAS_W] × [0, CANVAS_H]`
+  （`EditorState.beginTextPlacement`）：平移视口后点击换算出的坐标可能落在纸面之外，不夹的话
+  放置出来的文字会被 `clipToPaper` 整段裁没,却仍然占着撤销栈、撑大 `contentBounds()`。
 
 ### `t` 行格式与 base64
 
 `board/BoardCodec.kt`：
 
 ```
-t <argb8位小写hex> <sizeBoard> <x>,<y> <wBoard> <hBoard> <base64(utf8 text)|->
+t <argb8位小写hex> <sizeBoard> <x>,<y> <wBoard> <hBoard> <eBoard> <base64(utf8 text)|->
 ```
 
 - **文字必须 base64。** `wbd1` 是按空格分词、按行分隔的纯文本格式；用户打的文字里随时可能出现
@@ -83,8 +97,9 @@ t <argb8位小写hex> <sizeBoard> <x>,<y> <wBoard> <hBoard> <base64(utf8 text)|-
   于是一个文本为空的 `t` 行会**少一个 token**、被当成畸形行整行跳过——用户在输入面板里什么都
   不打直接点确认就会触发（实际上这条路径已经在 `TextInputSheet.commitText` 里被挡掉了：空白
   文本直接 `cancelTextPlacement()`，根本不会走到编码；但 `BoardCodec` 自己也要对这种输入保持
-  健壮，因为编解码器不能假设调用方永远守规矩）。解法是文本为空时第 7 个 token 显式写成单个
-  字符 `-`，而不是 base64 编码结果。**这个哨兵不会与任何真实 base64 输出冲突**：base64 字母表
+  健壮，因为编解码器不能假设调用方永远守规矩）。解法是文本为空时最后一个 token（第 8 个）
+  显式写成单个字符 `-`，而不是 base64 编码结果。**这个哨兵不会与任何真实 base64 输出冲突**：
+  base64 字母表
   是 `A-Za-z0-9+/=`，永远不产出裸 `-`，`-` 因此可以安全地被 `decode` 识别为"这是空文本"而不是
   "这是一段畸形 base64"。
 - **`HEADER` 保持字面量 `wbd1`，不升版本号。** 这正是 1a/1b 分期承诺的向后兼容：`decode` 对任何
@@ -94,14 +109,31 @@ t <argb8位小写hex> <sizeBoard> <x>,<y> <wBoard> <hBoard> <base64(utf8 text)|-
   在旧版本里看不见。反过来，1b-2 的 `decode` 同样跳过它还不认识的 `i` 行（1b-3 的图片），已用
   `BoardCodecTextTest` 的 "an unknown prefix is still skipped rather than fatal" 锁定。
 
-### `measureTextLayout` 是三个测量输入的唯一来源
+### `measureTextLayout` 是五个测量输入的唯一来源
 
 `content/editor/BoardDrawing.kt` 的 `internal fun measureTextLayout(text, sizeBoard, wBoard,
-measurer)` 是屏幕渲染路径（`drawTextItem`）与创建时测量路径（`TextInputSheet.commitText`，用来
-算出存进 `TextItem.hBoard` 的高度）**共用的唯一入口**。三个测量输入——`TextStyle(fontSize =
-sizeBoard.sp)`、`Constraints(maxWidth = wBoard.roundToInt().coerceAtLeast(1))`（含四舍五入）、
-`density = TEXT_MEASURE_DENSITY`（`Density(1f, 1f)`）——全部封在这一个函数体内，两个调用方只
-传 `text`/`sizeBoard`/`wBoard`/`measurer` 四个参数，不可能各自维护一份、迟早对不上。
+measurer, fontFamilyResolver)` 是屏幕渲染路径（`drawTextItem`）与创建时测量路径
+（`TextInputSheet.commitText`，用来算出存进 `TextItem.hBoard`/`eBoard` 的高度与墨迹宽度）
+**共用的唯一入口**。五个测量输入——`TextStyle(fontSize = sizeBoard.sp)`、
+`Constraints(maxWidth = wBoard.roundToInt().coerceAtLeast(1))`（含四舍五入）、
+`density = TEXT_MEASURE_DENSITY`（`Density(1f, 1f)`）、`layoutDirection = LayoutDirection.Ltr`、
+`fontFamilyResolver`（由调用方显式传入，见下）——全部封在这一个函数体内，两个调用方只传
+`text`/`sizeBoard`/`wBoard`/`measurer`/`fontFamilyResolver` 五个参数，不可能各自维护一份、迟早
+对不上。
+
+- **`layoutDirection` 曾经是这条不变式漏掉的一半（1b-2 复审修复项）。** 加入这个函数时只钉死了
+  `fontSize`/`constraints`/`density` 三项，`layoutDirection` 与 `fontFamilyResolver` 却继续沿用
+  调用方传入的 `TextMeasurer` 自带的默认值——屏幕/创建时路径用 `rememberTextMeasurer()`
+  （`defaultLayoutDirection` 读当前系统区域设置），导出路径（`export.BoardRenderer`）手动构造时
+  钉死了 `LayoutDirection.Ltr`。RTL 系统语言下两条路径因此会排出不同方向的版面，存档的排版结果
+  变成"取决于用户系统语言"，而不是文档自己的属性——这正是 `fontScale` 被钉死为 1 同一类问题，
+  却在这里漏了一半。现在 `layoutDirection` 也在 `measureTextLayout` 内部钉死为 `Ltr`，跟
+  `sizeBoard`/`wBoard`/`TEXT_MEASURE_DENSITY` 一样不再依赖调用方传的默认值。
+- **`fontFamilyResolver` 没有一个可以钉死的"正确常量"**（分辨字体本身需要一个真实的
+  resolver），所以做法不同：显式加一个参数，两个调用方各自传入自己那份——`CanvasSurface.kt`/
+  `TextInputSheet.kt` 读 `LocalFontFamilyResolver.current`，`export.BoardRenderer` 用
+  `createFontFamilyResolver(context)`。两个实例不是同一个对象，但本应用没有声明任何自定义
+  `FontFamily`，在同一台设备上解析出的都是系统默认字体，不会让导出图与屏幕所见分叉。
 
 - **`Density(density = 1f, fontScale = 1f)` 同时钉死两个量。** `density = 1f` 让 `sizeBoard.sp`
   换算出的像素数值上直接等于 `sizeBoard` 本身（缩放完全交给 `drawBoard` 外层的
@@ -205,7 +237,7 @@ scale(viewport.scale * density, viewport.scale * density, pivot = Offset.Zero)
 wbd1
 s <argb8位小写hex> <widthDp> <x>,<y> <x>,<y> ...
 h <Line|Rect|Ellipse> <argb8位小写hex> <widthDp> <x>,<y> <x>,<y>
-t <argb8位小写hex> <sizeBoard> <x>,<y> <wBoard> <hBoard> <base64(utf8 text)|->
+t <argb8位小写hex> <sizeBoard> <x>,<y> <wBoard> <hBoard> <eBoard> <base64(utf8 text)|->
 ```
 
 - 首行必须是字面量 `wbd1`（版本号），否则整份解码抛 `CodecException`。**加 `t` 行没有把版本号
@@ -243,7 +275,12 @@ t <argb8位小写hex> <sizeBoard> <x>,<y> <wBoard> <hBoard> <base64(utf8 text)|-
   `TextItemTest`（`bounds()`、`contentBounds()` 参与、橡皮不影响文字、文字不影响同位置笔迹的
   可擦除性）与 `BoardCodecTextTest`（`t` 行编解码往返，含空格/tab/换行、空文本哨兵、与
   `s`/`h` 行混排、畸形行降级为跳过、未知前缀容忍）。`./gradlew :app:assembleDebug` 通过。
-  源码 grep 无 `androidx.compose.material`/`MaterialTheme`；`releaseRuntimeClasspath` 依赖树
+  **1b-2 复审修复轮（加入 `eBoard`/8-token `t` 行）后重跑：105/105 全绿，0 失败 0 错误**——
+  仍是同 14 个测试类，净增 3 条：`TextItemTest` 加了一条锁定"`bounds()` 宽度读 `eBoard` 而不是
+  更大的 `wBoard`"的断言；`BoardCodecTextTest` 加了两条，一条编解码往返锁定"短文本的 `eBoard`
+  远小于 `wBoard`、两者不会被搞混"，一条锁定"加 `eBoard` 之前写下的旧 7-token `t` 行会降级为
+  跳过并计数，不是回归"。源码 grep 无 `androidx.compose.material`/`MaterialTheme`；
+  `releaseRuntimeClasspath` 依赖树
   660 行，grep `-i material` 命中 0 次。
 - Task 5（2026-08-19，模拟器 `emulator-5554`，**不是真机**——见下方说明）：装机、前台确认
   （`dumpsys activity activities` 轮询 `topResumedActivity` 直到命中本包，不是固定 `sleep`）、

@@ -12,9 +12,11 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFontFamilyResolver
 import androidx.compose.ui.text.rememberTextMeasurer
 import com.pico.spatial.ui.design.PicoTheme
 import com.pico.spatial.ui.foundation.gesture.detectSpatialDragGesture
+import com.pico.spatial.ui.foundation.gesture.detectSpatialTapGesture
 import tech.illusion.spacewhiteboard.board.*
 
 private const val TAG = "SpaceWhiteboard"
@@ -70,6 +72,10 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
     // 自带的默认密度（来自 LocalDensity.current），所以这里的默认密度取值不影响渲染结果——
     // 见 BoardDrawing.kt 里 TEXT_MEASURE_DENSITY 的说明。
     val textMeasurer = rememberTextMeasurer()
+    // 显式读出来传给 measureTextLayout（BoardDrawing.kt，1b-2 复审修复项）：不再让测量
+    // 悄悄依赖 textMeasurer 自带的默认 resolver，两个调用方（这里与 TextInputSheet）都显式
+    // 传同一类来源，跟 layoutDirection 被钉死成 Ltr 是同一次修复的两半。
+    val fontFamilyResolver = LocalFontFamilyResolver.current
     // 拖拽游标位置：Pen 或 Eraser 拖拽进行中，"系统认为笔尖/擦除中心在哪"（board units）；
     // 没有 Pen/Eraser 拖拽时为 null、不画。用 mutableStateOf 而不是手势协程里的局部变量，
     // 原因和 state.livePoints 一样——下面 Canvas 的 draw lambda 要在另一处读它来画游标，
@@ -121,15 +127,6 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                 /** eraseBaseline 里全部对象的 id 集合，随 eraseBaseline 一起设置——用来判断
                  *  一次命中触碰的是基准原始对象，还是本次拖拽中途已经切出来的碎片。 */
                 var eraseBaselineIds: Set<ItemId> = emptySet()
-                /**
-                 * 文字工具本次手势的起点（画布坐标），只在 `Tool.Text` 手势中使用。
-                 * 定位靠"点击而不是拖拽"（brief 要求）：`detectSpatialDragGesture` 眼里一次点击
-                 * 就是起点与终点几乎重合的一次拖拽，所以复用 [MIN_SHAPE_SIZE] 那套误触判定的
-                 * 阈值——只是判定方向相反：Shape 用它排除"距离太近、可能是误触"的假形状；这里用
-                 * 它确认"距离足够近，这确实是一次点击"才弹出输入面板，拖出去视为用户改主意，
-                 * 不弹面板（也不留任何锚点/Op）。不存进 EditorState：文字工具在拖拽进行中不需要
-                 * 任何实时预览，局部变量就够，onDragEnd 用完随即清空。 */
-                var textAnchorBoard: Pt? = null
                 /** 本次擦除动作累积「碰过的基准对象」的 id；松手时据此从 eraseBaseline 换算
                  *  ReplaceItems.removed。碎片本身不进这个集合——它们的最终形态要等松手时
                  *  按 doc 终态收集（见 finishEraseBatch），不能在产生的当下就记下来，因为
@@ -164,9 +161,10 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                                 dragCursorTool.value = Tool.Eraser
                                 eraseAt(state, p, eraserRadiusBoard(density, state.viewport), eraseBaselineIds, touchedBaselineIds)
                             }
-                            Tool.Text -> {
-                                textAnchorBoard = p
-                            }
+                            // 文字工具不走拖拽路径（1b-2 复审修复项，见下面 onDragEnd 分支同名注释
+                            // 与本文件顶部第二个 pointerInput）：定位改用 detectSpatialTapGesture，
+                            // 这里什么都不做，只是为了让 `when` 对 `Tool` 保持穷尽。
+                            Tool.Text -> Unit
                             Tool.Pan -> Unit
                         }
                     },
@@ -199,17 +197,21 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                                 eraseBaseline = null
                                 eraseBaselineIds = emptySet()
                             }
-                            Tool.Text -> {
-                                val start = textAnchorBoard
-                                textAnchorBoard = null
-                                if (start != null) {
-                                    val end = state.viewport.toBoard(cursorPx.x / density, cursorPx.y / density)
-                                    // 起点终点几乎重合才算一次点击；拖出去视为改主意，不弹面板。
-                                    if (start.distanceTo(end) <= MIN_SHAPE_SIZE) {
-                                        state.beginTextPlacement(start)
-                                    }
-                                }
-                            }
+                            // 文字工具的定位不走这条拖拽路径（1b-2 复审修复项）。旧版在这里用
+                            // "起点终点几乎重合（<= MIN_SHAPE_SIZE，画布单位）"来判定"这算不算
+                            // 一次点击"——这个判定本身有两个致命缺陷：(1) `detectSpatialDragGesture`
+                            // 的 `awaitForDragStart` 在指针抬起前一直没有出现"既 positionChanged
+                            // 又处于 BEGIN/DRAGGING 运行时状态"的变化时，直接返回 null，onDragStart/
+                            // onDragEnd 都不会触发——一次真正原地不动的点击因此完全没有任何回调，
+                            // 连"判定"的机会都没有；(2) `MIN_SHAPE_SIZE`（4 画布单位）在启动时的
+                            // 50% 缩放、这台设备 2.0 密度下只等于 4 屏幕像素，而本文件顶部
+                            // `MIN_STEP_PX` 一节记录的真机中位单事件步长是 6.06px——一次事件的正常
+                            // 抖动就足以超过这个阈值，且这个阈值还随缩放倍数浮动最多 8 倍。定位现在
+                            // 改用下面第二个 `pointerInput` 里的 `detectSpatialTapGesture`：它刻意不
+                            // 限制指针移动量，把"算不算一次成功的点击"交给运行时判定
+                            // （`isRuntimeTapSuccess`），不再用任何画布单位或屏幕像素的距离阈值。
+                            // 这里因此什么都不做，只是为了让 `when` 对 `Tool` 保持穷尽。
+                            Tool.Text -> Unit
                             Tool.Pan, null -> Unit
                         }
                         dragCursorBoard.value = null
@@ -221,9 +223,8 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                         state.livePoints = emptyList()
                         state.liveShapeStart = null
                         state.liveShapeEnd = null
-                        // 文字工具从不在拖拽途中改 doc（只记一个局部锚点候选），取消没有数据要抢救，
-                        // 直接清掉候选，不留任何痕迹——与 Pen/Shape 同理，跟橡皮的情况不同。
-                        textAnchorBoard = null
+                        // 文字工具的定位不再挂在这条拖拽路径上（见上面 onDragStart/onDragEnd 的
+                        // Tool.Text 分支注释），这里没有它的状态需要清理。
                         dragCursorBoard.value = null
                         dragCursorTool.value = null
                         // 笔/形状在提交前从不改动 doc，取消时丢弃 live 缓冲即可，没有数据要抢救。
@@ -283,11 +284,47 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                             value.dragAmount.x / density,
                             value.dragAmount.y / density,
                         )
-                        // 文字工具不参与拖拽绘制：这里什么都不做，onDragEnd 用共享的 cursorPx
-                        // 累计值（在这个 when 之前已经更新过）判断这次拖拽算不算一次点击。
+                        // 文字工具不参与拖拽绘制：定位改走下面第二个 pointerInput 的
+                        // detectSpatialTapGesture，这里什么都不做。
                         Tool.Text -> Unit
                         null -> Unit
                     }
+                }
+            }
+            // 第二个独立的 pointerInput：文字工具的点击定位（1b-2 复审修复项）。与上面的拖拽
+            // 检测器分开放在各自独立的 pointerInput 实例里，不是同一个协程里顺序/并发调用两个
+            // detect 函数——这是本项目已经验证过的共存方式（分支 experiment/pointer-absolute，
+            // 见 AGENTS.md「指针模型实验与被否定的假设」：detectSpatialDragGesture 与
+            // detectSpatialPointerEvent 在各自独立的 pointerInput 里被同时挂在同一个元素上，
+            // 两者都能触发，互不干扰）；detectSpatialTapGesture 与 detectSpatialDragGesture
+            // 是同一层次的手势检测器，套用同一条已验证的共存方式。
+            //
+            // key 用 `state.tool == Tool.Text` 而不是 `Unit`：`detectSpatialTapGesture` 内部是
+            // `awaitEachGesture { ... }`，一旦启动就会在同一个协程里无限循环处理"下一次手势"，
+            // 每次手势开始都无条件 `consume()` down 事件（源码见 foundation-6.0.0 sources jar 的
+            // `SpatialTapGestureDetector.kt`）。如果这个 pointerInput 用固定的 `Unit` 键、从组合
+            // 起就常驻，它会在 Pen/Shape/Eraser 工具落下第一个点时也提前消费掉那个 down 事件，
+            // 干扰上面拖拽检测器对同一次按下的追踪。用 `state.tool == Tool.Text` 当 key：工具
+            // 切走文字时键值翻转，Compose 取消这个协程（连带中断内部还在等待的手势循环）并用新
+            // 键重新执行一次代码块，不会有消费残留；工具切回文字时键值再翻转，重新进入代码块，
+            // 这次读到的 `state.tool` 才真的是 `Text`，再启动 `detectSpatialTapGesture`。
+            .pointerInput(state.tool == Tool.Text) {
+                if (state.tool != Tool.Text) return@pointerInput
+                detectSpatialTapGesture(context = context) { value ->
+                    // key 保证了"这个协程活着的时候，工具在它刚启动那一刻是 Text"，但协程存活
+                    // 期间可能经历多次 tap（`awaitEachGesture` 循环），这里再判一次当前
+                    // `state.tool`——不是多余的防御，是因为 Compose 取消协程有一个调度延迟：
+                    // 用户可能在这次 tap 的 up 事件已经触发 onTap、但取消信号还没被下一次重组
+                    // 处理掉之前，已经把工具切走了。
+                    if (state.tool != Tool.Text) return@detectSpatialTapGesture
+                    // value.position 是 com.pico.spatial.ui.geometry.Offset3D（屏幕像素，带 z），
+                    // 与拖拽检测器的 offset 同一种坐标系，同样只取 x/y、除以 density 换算成 dp
+                    // 再喂给 viewport.toBoard。
+                    val anchor = state.viewport.toBoard(value.position.x / density, value.position.y / density)
+                    // 锚点夹进纸面矩形（1b-2 复审修复项，配合 TextInputSheet 里的换行宽度改法）：
+                    // 平移视口之后用户完全可能点在 [0,CANVAS_W]×[0,CANVAS_H] 之外，见
+                    // EditorState.beginTextPlacement 里的 coerceIn。
+                    state.beginTextPlacement(anchor)
                 }
             },
     ) {
@@ -299,7 +336,7 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
             val alive = state.doc.items.map { it.id }.toSet()
             pathCache.keys.retainAll(alive)
         }
-        drawBoard(state.doc, state.viewport, density, pathCache, textMeasurer)
+        drawBoard(state.doc, state.viewport, density, pathCache, textMeasurer, fontFamilyResolver)
         // 预览一律读 live* 派生属性：手势进行中它们返回 onDragStart 锁存的那一份样式，
         // 与 onDragEnd 提交用的是同一个 ActiveStyle 实例。工具栏做出来之后这条很要紧 ——
         // 另一根手指完全可以在拖拽途中换颜色，那时读 state.colorArgb 会让预览和落笔不一致。

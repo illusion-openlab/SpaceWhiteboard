@@ -6,9 +6,12 @@ import org.junit.Test
 
 class TextItemTest {
 
+    // `w` here is the measured ink extent (eBoard) — what `bounds()` actually reads.
+    // `wBoard` (the wrap constraint) is set to the same value: irrelevant to every
+    // assertion in this file, which only exercises bounds()/contentBounds()/eraser behavior.
     private fun text(anchor: Pt, w: Float, h: Float) = TextItem(
         id = ItemId(1), text = "hello", colorArgb = 0xFF112233.toInt(),
-        sizeBoard = 24f, anchor = anchor, wBoard = w, hBoard = h,
+        sizeBoard = 24f, anchor = anchor, wBoard = w, hBoard = h, eBoard = w,
     )
 
     @Test
@@ -18,6 +21,19 @@ class TextItemTest {
         assertEquals(50f, b.top, 1e-4f)
         assertEquals(300f, b.right, 1e-4f)
         assertEquals(110f, b.bottom, 1e-4f)
+    }
+
+    @Test
+    fun `bounds width follows the measured extent, not the larger wrap constraint`() {
+        // wBoard（换行约束）远大于 eBoard（测量出的墨迹宽度）——一个短文本在一个很宽的换行框里
+        // 测量出来的样子。bounds() 必须贴着墨迹本身，不能被换行约束撑大（1b-2 复审修复项）。
+        val short = TextItem(
+            id = ItemId(1), text = "hi", colorArgb = 0xFF112233.toInt(),
+            sizeBoard = 24f, anchor = Pt(0f, 0f), wBoard = 800f, hBoard = 30f, eBoard = 42f,
+        )
+        val b = short.bounds()
+        assertEquals(42f, b.right, 1e-4f)
+        assertEquals(0f, b.left, 1e-4f)
     }
 
     @Test

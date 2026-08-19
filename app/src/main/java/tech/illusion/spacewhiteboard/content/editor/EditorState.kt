@@ -78,9 +78,20 @@ class EditorState(initialDoc: BoardDoc, initialNextId: Long) {
     /** 输入面板里的当前文本。面板关闭（提交或取消）时清空。 */
     var pendingText by mutableStateOf("")
 
-    /** 文字工具点击定位后调用：记下锚点、清空输入框，驱动 `TextInputSheet` 出现。 */
+    /**
+     * 文字工具点击定位后调用：记下锚点、清空输入框，驱动 `TextInputSheet` 出现。
+     *
+     * 锚点先夹进纸面矩形 `[0, CANVAS_W] × [0, CANVAS_H]`（1b-2 复审修复项）：视口平移之后，
+     * 点击换算出的画布坐标完全可能落在纸面之外——若不夹，放置出来的文字会被 `clipToPaper`
+     * 整段裁没，用户什么都看不见，却仍然占着撤销栈、还会把 `contentBounds()`（进而导出裁切）
+     * 撑大到一块看不见的地方。这里只夹锚点本身，不影响换行宽度的计算——`TextInputSheet` 拿到
+     * 的已经是夹过的锚点，天然不会再算出"起点在纸面外"的换行宽度。
+     */
     fun beginTextPlacement(anchor: Pt) {
-        pendingTextAnchor = anchor
+        pendingTextAnchor = Pt(
+            anchor.x.coerceIn(0f, Viewport.CANVAS_W),
+            anchor.y.coerceIn(0f, Viewport.CANVAS_H),
+        )
         pendingText = ""
     }
 
