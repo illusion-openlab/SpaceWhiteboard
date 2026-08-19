@@ -1,6 +1,5 @@
 package tech.illusion.spacewhiteboard
 
-import android.util.Log
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -13,6 +12,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -21,14 +21,21 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.pico.spatial.ui.design.PicoTheme
 import com.pico.spatial.ui.design.Text
+import com.pico.spatial.ui.design.windows.LocalSnackbarHostState
 import com.pico.spatial.ui.foundation.dsl.DefaultWindowContainer
 import com.pico.spatial.ui.foundation.dsl.SpatialAppScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import tech.illusion.spacewhiteboard.board.BoardDoc
+import tech.illusion.spacewhiteboard.content.PAPER_ARGB
 import tech.illusion.spacewhiteboard.content.WhiteboardColorScheme
 import tech.illusion.spacewhiteboard.content.editor.AutoSave
 import tech.illusion.spacewhiteboard.content.editor.BoardEditor
 import tech.illusion.spacewhiteboard.content.editor.EditorState
 import tech.illusion.spacewhiteboard.content.editor.SaveStatus
+import tech.illusion.spacewhiteboard.export.BoardRenderer
+import tech.illusion.spacewhiteboard.export.MediaStoreExporter
 import tech.illusion.spacewhiteboard.store.BoardStore
 import tech.illusion.spacewhiteboard.store.LoadResult
 import java.io.File
@@ -38,6 +45,16 @@ fun mainApp(scope: SpatialAppScope) =
         DefaultWindowContainer {
             PicoTheme(colorScheme = WhiteboardColorScheme) {
                 val context = LocalContext.current
+                // PicoTheme 已经在其 content 外层套了一层 SnackbarHost（design-6.0.0 源码
+                // `PicoTheme.kt`：`TextSelectionAndToolbarProvider { SnackbarHost(content) }`），
+                // 这里读到的就是那个宿主提供的状态，不需要再手动包一层 SnackbarHost。
+                val snackbarHostState = LocalSnackbarHostState.current
+                // colorScheme.error 是一次 Composable 读取，导出协程跑在合成之外，必须
+                // 提前在这里取出普通的 Color 值，不能在 launch{} 里再读 PicoTheme.colorScheme。
+                val exportFailureColor = PicoTheme.colorScheme.error
+                // 导出要经历渲染 + PNG 压缩两步 IO/CPU 工作，绑定到组合作用域的协程作用域，
+                // 这样即便触发导出后用户很快离开这个组合，协程仍能正常收尾/取消。
+                val exportScope = rememberCoroutineScope()
                 val boardFile = remember {
                     File(context.filesDir, "projects/default/boards/main.wbd")
                 }
@@ -67,8 +84,36 @@ fun mainApp(scope: SpatialAppScope) =
                     BoardEditor(
                         state = state,
                         saveStatus = saveStatus,
-                        // Task 18 接 MediaStore 导出；在那之前点了也要留痕，别静默无反应。
-                        onExport = { Log.i("SpaceWhiteboard", "导出 PNG 尚未接线（Task 18）") },
+                        onExport = {
+                            exportScope.launch {
+                                // 渲染（Canvas 绘制）与 PNG 压缩都挪到 IO 线程：一张 2x 的
+                                // 大图，这两步合起来足以让主线程明显卡顿一下。
+                                val bitmap = withContext(Dispatchers.IO) {
+                                    BoardRenderer.render(state.doc, paperArgb = PAPER_ARGB)
+                                }
+                                if (bitmap == null) {
+                                    // 空文档：不是失败，是没什么可导出的，不用 error 语气。
+                                    snackbarHostState.show(message = "白板是空的，没有可导出的内容")
+                                    return@launch
+                                }
+                                // 毫秒时间戳单独用可能在两次快速点击间撞车（同一毫秒内两次导出
+                                // 会覆盖同一个 MediaStore 条目）；再叠一段 nanoTime 的低位做去重。
+                                val displayName = "whiteboard-${System.currentTimeMillis()}" +
+                                    "-${System.nanoTime() % 1_000_000L}"
+                                val uri = withContext(Dispatchers.IO) {
+                                    MediaStoreExporter.exportPng(context, bitmap, displayName)
+                                }
+                                if (uri != null) {
+                                    snackbarHostState.show(message = "已导出到相册")
+                                } else {
+                                    // 契约 §4 文案；用 error 角色着色区分于"成功"的普通提示。
+                                    snackbarHostState.show(
+                                        message = "导出失败，请重试",
+                                        backgroundColor = exportFailureColor,
+                                    )
+                                }
+                            }
+                        },
                     )
 
                     // 存档损坏：用户有权知道自己的东西没了、以及备份在哪。这条常驻提示条

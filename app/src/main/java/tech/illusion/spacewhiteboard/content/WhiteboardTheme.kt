@@ -31,3 +31,14 @@ val WhiteboardColorScheme: ColorScheme = defaultColorScheme(
     interaction = Color(0xFF6699FF),
     dividerLine = Color(0x24FFFFFF),
 )
+
+/**
+ * `canvas.paper` 纸面色的原始 ARGB 值，与上面 [WhiteboardColorScheme] 的 `fillTertiary`
+ * 同源（契约 §8：`0xFFF6F3EC`）。
+ *
+ * 离屏渲染（`export.BoardRenderer`）跑在 IO 线程，而 `PicoTheme.colorScheme` 是一个
+ * `CompositionLocal`，只能在合成阶段、主线程的 `@Composable` 函数里读——导出路径读不到它。
+ * 因此单独存一份不依赖 Compose 的常量，供 PNG 导出与（阶段 2）列表缩略图两处共用，
+ * 取值必须跟 `fillTertiary` 手动保持一致。
+ */
+const val PAPER_ARGB: Int = 0xFFF6F3EC.toInt()
