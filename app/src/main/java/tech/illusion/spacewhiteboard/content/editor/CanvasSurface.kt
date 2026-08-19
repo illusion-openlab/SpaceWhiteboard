@@ -64,9 +64,10 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
     val density = LocalDensity.current.density
     val scheme = PicoTheme.colorScheme
     val pathCache = remember { mutableMapOf<ItemId, Path>() }
-    // 笔尖游标：Pen 拖拽进行中，"系统认为落墨点在哪"（board units）；没有 Pen 拖拽时为
-    // null、不画。用 mutableStateOf 而不是手势协程里的局部变量，原因和 state.livePoints
-    // 一样——下面 Canvas 的 draw lambda 要在另一处读它来画游标，局部变量读不到。
+    // 拖拽游标位置：Pen 或 Eraser 拖拽进行中，"系统认为笔尖/擦除中心在哪"（board units）；
+    // 没有 Pen/Eraser 拖拽时为 null、不画。用 mutableStateOf 而不是手势协程里的局部变量，
+    // 原因和 state.livePoints 一样——下面 Canvas 的 draw lambda 要在另一处读它来画游标，
+    // 局部变量读不到。
     // 只做 state 1（拖拽中）：真机实验（分支 experiment/pointer-absolute，见 AGENTS.md
     // 「指针模型实验与被否定的假设」）已经证明 detectSpatialPointerEvent 与
     // detectSpatialDragGesture 可以在同一个元素上共存（两者都能触发），所以这不再是一个
@@ -74,6 +75,9 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
     // 拖拽路径，悬停游标是独立的一块工作量（接线悬停事件、决定悬停态的视觉区分），放到
     // 下一轮再做，不是拿"猜的"悬停位置糊弄用户。
     val dragCursorBoard = remember { mutableStateOf<Pt?>(null) }
+    // 上面那个位置到底该画成笔尖环还是橡皮环——`active` 是手势协程里的局部变量，draw lambda
+    // 读不到，所以跟 dragCursorBoard 一样单独存一份 state（Task 5：橡皮光标）。
+    val dragCursorTool = remember { mutableStateOf<Tool?>(null) }
 
     Canvas(
         modifier = modifier
@@ -131,6 +135,7 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                                 state.livePoints = listOf(p)
                                 lastAcceptedPenPx = cursorPx
                                 dragCursorBoard.value = p
+                                dragCursorTool.value = Tool.Pen
                             }
                             Tool.Shape -> {
                                 state.liveShapeStart = p
@@ -140,6 +145,8 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                                 eraseBaseline = state.doc
                                 eraseBaselineIds = state.doc.items.mapTo(HashSet()) { it.id }
                                 touchedBaselineIds.clear()
+                                dragCursorBoard.value = p
+                                dragCursorTool.value = Tool.Eraser
                                 eraseAt(state, p, eraserRadiusBoard(density, state.viewport), eraseBaselineIds, touchedBaselineIds)
                             }
                             Tool.Pan -> Unit
@@ -177,6 +184,7 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                             Tool.Pan, null -> Unit
                         }
                         dragCursorBoard.value = null
+                        dragCursorTool.value = null
                         active = null
                         state.endGesture()
                     },
@@ -185,6 +193,7 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                         state.liveShapeStart = null
                         state.liveShapeEnd = null
                         dragCursorBoard.value = null
+                        dragCursorTool.value = null
                         // 笔/形状在提交前从不改动 doc，取消时丢弃 live 缓冲即可，没有数据要抢救。
                         // 橡皮不同：拖拽途中已经把命中对象从 doc 里即时切分掉了（见 eraseAt），
                         // 取消手势不能让这些切分变成"改过文档、却没有对应撤销记录"的既成事实——
@@ -212,7 +221,12 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                             }
                         }
                         Tool.Shape -> if (state.liveShapeStart != null) state.liveShapeEnd = p
-                        Tool.Eraser -> eraseAt(state, p, eraserRadiusBoard(density, state.viewport), eraseBaselineIds, touchedBaselineIds)
+                        Tool.Eraser -> {
+                            // 橡皮游标要跟手：跟笔尖游标一样，每个事件都如实更新"系统当下认为
+                            // 擦除中心在哪"，不受任何采样过滤影响。
+                            dragCursorBoard.value = p
+                            eraseAt(state, p, eraserRadiusBoard(density, state.viewport), eraseBaselineIds, touchedBaselineIds)
+                        }
                         // 平移是纯视口变化：不提交、不入撤销栈，视口本就不是文档的一部分。
                         // 用 value.dragAmount（本次增量，屏幕像素）而不是 cursorPx（累计绝对值），
                         // panBy 要的是这一帧的位移量，不是从手势起点算起的位移总量。
@@ -247,9 +261,21 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                 state.liveColorArgb, state.liveWidthDp, state.viewport, density,
             )
         }
-        // 游标最后画，叠在已提交内容和实时预览之上，永远看得见。
+        // 游标最后画，叠在已提交内容和实时预览之上，永远看得见。画成笔尖环还是橡皮环
+        // 由 dragCursorTool 决定——两者共用同一个位置 state，但语义、颜色、半径来源都不同
+        // （Task 5：橡皮环半径必须等于 eraserRadiusBoard，即 eraseAt 真正用来命中测试的
+        // 那个半径，不能另起一个数）。Shape/Pan 拖拽不产生游标，穷举写出来只是为了让
+        // `when` 保持对 Tool? 的完整覆盖，不是真的会画什么。
         dragCursorBoard.value?.let { pos ->
-            drawPenCursor(pos, state.liveWidthDp, scheme.interaction, state.viewport, density)
+            when (dragCursorTool.value) {
+                Tool.Pen -> drawPenCursor(pos, state.liveWidthDp, scheme.interaction, state.viewport, density)
+                Tool.Eraser -> drawEraserCursor(
+                    pos, eraserRadiusBoard(density, state.viewport), scheme.error, state.viewport, density,
+                )
+                Tool.Shape -> Unit
+                Tool.Pan -> Unit
+                null -> Unit
+            }
         }
     }
 }

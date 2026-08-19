@@ -233,6 +233,44 @@ fun DrawScope.drawPenCursor(
     }
 }
 
+/**
+ * 橡皮游标（Task 5，局部擦除跟随轮）：与 [drawPenCursor] 同样只在屏幕渲染路径调用、从不并入
+ * [drawBoard]——PNG 导出（`export.BoardRenderer`）只调 [drawBoard]，天然看不到它。
+ *
+ * 半径直接吃调用方传入的 [radiusBoard]，不在这里重新计算——调用点（`CanvasSurface`）传的是
+ * `eraserRadiusBoard(density, viewport)`，跟 `eraseAt` 真正拿去做命中测试的半径是同一份换算
+ * 结果，两处永远读同一个来源，环画多大就真的擦多大。热区本身是屏幕空间常量（Task 4a
+ * `ERASER_RADIUS_PX`），所以这个环在屏幕上尺寸恒定、不随 `viewport.scale` 缩放——这是预期
+ * 行为，不是需要"修"的缩放缺陷：笔尖游标画的是"这一笔会有多粗"（画布几何量，理应随缩放
+ * 变化），橡皮游标画的是"手指划过多宽一圈算擦到"（屏幕手势量，不该随缩放变化）。
+ *
+ * 颜色取 [WhiteboardColorScheme] 的 `error` 角色（警示/危险语义，天然贴合"即将删除"），
+ * 与笔尖游标固定用的 `interaction`（蓝）色相不同，一眼能分清当前是画还是擦，不新增颜色
+ * 字面量。裁剪与笔尖游标一致：先 `withTransform` 再 [clipToPaper]，游标本身也不该画到
+ * 纸面之外。
+ */
+fun DrawScope.drawEraserCursor(
+    pos: Pt,
+    radiusBoard: Float,
+    color: Color,
+    viewport: Viewport,
+    density: Float,
+) {
+    withTransform({
+        translate(viewport.offsetX * density, viewport.offsetY * density)
+        scale(viewport.scale * density, viewport.scale * density, pivot = Offset.Zero)
+    }) {
+        clipToPaper(viewport) {
+            drawCircle(
+                color = color,
+                radius = radiusBoard,
+                center = Offset(pos.x, pos.y),
+                style = StrokeStyle(width = PEN_CURSOR_RING_STROKE, cap = StrokeCap.Round),
+            )
+        }
+    }
+}
+
 /** 二次贝塞尔中点法建路径，坐标全在 board units，因此与视口无关、可缓存。 */
 private fun buildStrokePath(points: List<Pt>): Path {
     val sp = StrokeSmoothing.smooth(points) ?: return Path()
