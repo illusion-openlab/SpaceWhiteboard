@@ -103,13 +103,18 @@ private val SHEET_BUTTON_GAP = 12.dp
 private const val SHEET_SCRIM_ALPHA = 0.72f
 
 /**
- * `focusRequester.requestFocus()` 第一次调用失败（面板刚进组合，`TextArea` 内部
- * `BasicTextField` 的 focus 子树可能还没挂完）时，重试前的等待——只重试这一次，不是一个
- * 等条件成立的循环，见下面 `LaunchedEffect` 处的说明。不用 `withFrameNanos`：本项目已经
+ * `focusRequester.requestFocus()` 失败重试之间的等待。不用 `withFrameNanos`：本项目已经
  * 证实它在 `DefaultWindowContainer` 里只触发一次、之后再也不跑（`AGENTS.md`），这里改用
  * `delay`。取值只需要明显小于用户能感知的延迟，不是一个需要在真机上标定的手感数字。
  */
 private const val FOCUS_RETRY_DELAY_MS = 32L
+
+/**
+ * `requestFocus()` 的固定重试次数上限——不是"直到聚焦成功为止"的无界循环，见下面
+ * `LaunchedEffect` 处的说明。命中即停：一旦某次调用不再抛异常就立刻返回，不会把剩余次数
+ * 也打满。
+ */
+private const val FOCUS_RETRY_ATTEMPTS = 3
 
 /**
  * 文字工具的输入面板：点画布定位之后弹出，`TextArea` 收系统输入法打进来的文字，
@@ -159,16 +164,23 @@ fun TextInputSheet(state: EditorState, modifier: Modifier = Modifier) {
     // 可能落在工具栏的某个按钮上，不是这里的 `TextArea`）和 effect 的调度时序（面板必须先被
     // 放置好，`moveFocus` 才有一个已经存在的焦点树可以走）,两个前提都不是这段代码自己能保证的。
     //
-    // 面板出现的那一刻，`TextArea` 的 focus 子树有没有真的挂上还有一次调度延迟的不确定性
-    // （面板刚进组合、`BasicTextField` 的 `focusTarget()` 节点可能还没完成挂载），第一次
-    // `requestFocus()` 因此可能落空。这里只重试一次、用固定的短延迟——不是一个等条件成立的
-    // 循环：重试次数在代码里是写死的两次调用，不存在"一直不获得焦点就一直重试"的循环路径。
+    // 抓焦点的 `LaunchedEffect` 必须活在下面 `BoxWithConstraints` 的 content 里，不能待在这个
+    // 层级（1b-2 复审修复项 E，修正上一版的放置错误）：`BoxWithConstraints` 是一个
+    // `SubcomposeLayout`——它的 content（包括挂 `Modifier.focusRequester` 的 `TextArea`）是在
+    // **测量**阶段才被子组合出来的，不是跟这个外层 Composable 同一次组合。`LaunchedEffect` 放
+    // 在这里，意味着它属于外层组合、跟 `TextArea` 所在的子组合完全是两回事——`focusRequester`
+    // 什么时候真正挂上某个焦点节点，相对于这个 effect 什么时候跑，是一场帧时序竞态，赌哪一边
+    // 先到没有意义。而且 `FocusRequester.requestFocus()` 输了这场竞态时不是静默空操作，是真的
+    // 抛 `IllegalStateException`（"FocusRequester is not initialized..."——已在本应用编译产物的
+    // dex 里直接验证过这行字符串存在）：异常会杀死这个协程，原本指望的重试永远执行不到，异常
+    // 还会从 `LaunchedEffect` 里向外传——也就是说，弹出输入面板这个动作本身能崩溃应用。修法有
+    // 两条，缺一不可：把这个 effect 挪进 `BoxWithConstraints` 的 content（这样它跟
+    // `TextArea` 属于同一次子组合，`focusRequester` 挂没挂不再是跨子组合的竞态），并且让每一次
+    // `requestFocus()` 调用本身都吞掉这个异常（见下面 effect 里的 `runCatching`）——这样即使
+    // 子组合内部仍然存在一次调度延迟（`BasicTextField` 的 `focusTarget()` 节点还没挂完），
+    // 也只是让这一次调用失败重试，不会再让协程被异常杀死。重试次数是写死的
+    // [FOCUS_RETRY_ATTEMPTS] 次，命中即停，不存在"一直不获得焦点就一直重试"的循环路径。
     val focusRequester = remember { FocusRequester() }
-    LaunchedEffect(Unit) {
-        focusRequester.requestFocus()
-        delay(FOCUS_RETRY_DELAY_MS)
-        focusRequester.requestFocus()
-    }
 
     // 换行宽度依赖锚点位置（见 wrapBoardFor 的说明），只在锚点第一次出现时算一次；锚点在这个
     // 面板存活期间不会变（提交/取消都会让 state.pendingTextAnchor 变 null、面板整体消失）。
@@ -243,6 +255,22 @@ fun TextInputSheet(state: EditorState, modifier: Modifier = Modifier) {
             // 必须消费指针事件，否则点击会穿透遮罩点亮下层工具栏（与 ClearConfirmOverlay 同一条教训）。
             .consumeAllPointerEvents(),
     ) {
+        // 这里才是 TextArea 真正所在的子组合（见上面 focusRequester 声明处的说明）——effect
+        // 必须留在这个 lambda 里，不能提到 BoxWithConstraints 外层。每次 `requestFocus()` 都用
+        // `runCatching` 包一层：调用发生在 `focusRequester` 还没挂上任何焦点节点的那一刻会抛
+        // `IllegalStateException`，`runCatching` 让这次调用失败但协程活下来，才轮得到下一次
+        // 重试；一旦某次调用不抛异常（`isSuccess`），说明已经挂上了目标，立刻返回、不再消耗
+        // 剩下的重试次数。
+        LaunchedEffect(Unit) {
+            repeat(FOCUS_RETRY_ATTEMPTS) { attempt ->
+                val requested = runCatching { focusRequester.requestFocus() }.isSuccess
+                if (requested) return@LaunchedEffect
+                if (attempt < FOCUS_RETRY_ATTEMPTS - 1) {
+                    delay(FOCUS_RETRY_DELAY_MS)
+                }
+            }
+        }
+
         // 卡面避开锚点所在的半区（见类注释「卡面避开锚点」），现在按锚点的屏幕 y 坐标判断，
         // 不再按画布逻辑坐标判断（见上面 BoxWithConstraints 的说明）。
         val anchorScreenY = state.viewport.toScreenY(safeAnchor.y)
