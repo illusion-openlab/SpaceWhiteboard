@@ -50,10 +50,16 @@ import tech.illusion.spacewhiteboard.board.Viewport
 
 /**
  * 自动保存状态指示（设计契约 §2.1 `saveStatus` / §3 状态表 / §4 文案表）。
- * Task 17 接线自动保存时把真实状态从 BoardStore 传进 [BoardEditor]；本任务只负责渲染。
+ * Task 17 接线自动保存，真实状态从 [tech.illusion.spacewhiteboard.content.editor.AutoSave] 传进 [BoardEditor]。
  * 契约 §5 明确 1a 的 `saveStatus` 不可点击，所以这里没有回调。
+ *
+ * `Idle` 是 Task 17 新加的第四态：应用刚启动、还没有过一次保存尝试（debounce 从未触发，
+ * 也没有发生过 onPause/onStop）。契约 §2.1 对 `saveStatus` 三态（Saved/Saving/Failed）
+ * 都有视觉定义，唯独没提这种"还不知道"的初始态——用 `Saved` 顶替会撒谎（其实还没存过），
+ * 用 `Failed` 顶替会误报。§2.1 原文写"Idle → 不显示"，即这一态不画东西，因此新增
+ * 一个不落在契约状态表里的值是安全的：它只影响"画不画"，不影响其余三态的既有视觉。
  */
-enum class SaveStatus { Saved, Saving, Failed }
+enum class SaveStatus { Idle, Saving, Saved, Failed }
 
 // ── 设计契约 §2.3 变体 B（左侧栏）的几何。全部来自契约，不要就地"微调"。──────────────
 /** `toolbar` 宽 120dp，上下内边距 6dp，子项间距 8dp。 */
@@ -449,17 +455,23 @@ private fun ZoomStepButton(glyph: String, description: String, enabled: Boolean,
     }
 }
 
-/** `saveStatus`：圆点 + 文字，不可点击（契约 §5、§11 歧义 #4：1a 不做点击重试）。 */
+/**
+ * `saveStatus`：圆点 + 文字，不可点击（契约 §5、§11 歧义 #4：1a 不做点击重试）。
+ * `Idle` 按契约 §2.1「不显示」处理——直接不画，Spacer(weight=1f) 照常把其余内容顶住。
+ */
 @Composable
 private fun SaveStatusRow(status: SaveStatus) {
+    if (status == SaveStatus.Idle) return
     val scheme = PicoTheme.colorScheme
     val dotColor = when (status) {
+        SaveStatus.Idle -> return
         SaveStatus.Saved -> scheme.passable
         SaveStatus.Saving -> scheme.alert
         SaveStatus.Failed -> scheme.error
     }
     val textColor = if (status == SaveStatus.Failed) scheme.error else scheme.labelSecondary
     val label = when (status) {
+        SaveStatus.Idle -> return
         SaveStatus.Saved -> "已保存"
         SaveStatus.Saving -> "保存中…"
         SaveStatus.Failed -> "保存失败"
