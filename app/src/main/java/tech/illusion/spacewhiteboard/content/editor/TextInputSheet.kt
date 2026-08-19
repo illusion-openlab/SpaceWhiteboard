@@ -3,7 +3,7 @@ package tech.illusion.spacewhiteboard.content.editor
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -18,11 +18,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusDirection
-import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalFontFamilyResolver
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
@@ -31,7 +32,9 @@ import com.pico.spatial.ui.design.ButtonDefaults
 import com.pico.spatial.ui.design.PicoTheme
 import com.pico.spatial.ui.design.Text
 import com.pico.spatial.ui.design.TextArea
+import kotlinx.coroutines.delay
 import tech.illusion.spacewhiteboard.board.AddItem
+import tech.illusion.spacewhiteboard.board.Pt
 import tech.illusion.spacewhiteboard.board.TextItem
 import tech.illusion.spacewhiteboard.board.Viewport
 import kotlin.math.min
@@ -63,6 +66,28 @@ private const val MIN_WRAP_BOARD = 160f
 private fun wrapBoardFor(anchorX: Float): Float =
     min(Viewport.CANVAS_W / 3f, Viewport.CANVAS_W - anchorX).coerceAtLeast(MIN_WRAP_BOARD)
 
+/**
+ * 把锚点再往纸面内侧收紧一次（1b-2 复审修复项 C）。锚点在这里进来之前已经被
+ * `EditorState.beginTextPlacement` 夹进了 `[0, CANVAS_W] × [0, CANVAS_H]`——但那个夹取只保证
+ * 锚点本身合法，不保证锚点之后还留得下任何东西。锚点正好夹在纸面右/下边界上时：横向，
+ * [wrapBoardFor] 算出的"剩余空间"趋近于 0，会被 [MIN_WRAP_BOARD] 这个下限顶到 160，但锚点
+ * 本身没挪、换行框整段落在 `[CANVAS_W, CANVAS_W + 160]`，一个字都不在纸面内；纵向同理，
+ * 锚点贴在 `CANVAS_H` 上，连第一行的顶端都已经在纸面外。`clipToPaper` 会把这样的
+ * `TextItem` 整段裁没——橡皮擦不认文字、1b-4 之前也没有选择工具，用户能做的只有撤销这一步
+ * 或者清空整块白板，回收不了这一个看不见的对象。
+ *
+ * 这里再收紧一次上界：横向至少留出 [MIN_WRAP_BOARD]（换行宽度的下限，也就是不管怎么写、
+ * 第一行至少能装下的宽度），纵向至少留出 [oneLineBoard]（真按 `TEXT_SIZE_BOARD` 测出来的
+ * 一行高度，不是猜的比例）。不会把锚点推出 `[0, CANVAS_W] × [0, CANVAS_H]`——两个上界
+ * （`CANVAS_W - MIN_WRAP_BOARD`、`CANVAS_H - oneLineBoard`）都远大于 0，`coerceAtMost`
+ * 只收紧上界，原有的非负下界不受影响。[wrapBoardFor] 与最终提交进 [TextItem.anchor] 的必须
+ * 是同一个收紧过的值——两处如果各读一份、其中一处漏了收紧，纸面边缘的失踪文字就会重新出现。
+ */
+private fun containAnchor(anchor: Pt, oneLineBoard: Float): Pt = Pt(
+    anchor.x.coerceAtMost(Viewport.CANVAS_W - MIN_WRAP_BOARD),
+    anchor.y.coerceAtMost(Viewport.CANVAS_H - oneLineBoard),
+)
+
 /** 面板卡面宽度，与 `clearDialog` 同宽（契约 §2.2 `clearDialog` 420dp），保持两个模态面板同一视觉语言。 */
 private val SHEET_WIDTH = 420.dp
 private val SHEET_RADIUS = 18.dp
@@ -76,6 +101,15 @@ private val SHEET_BUTTON_GAP = 12.dp
  * 这不是另起一个数，是复用本应用已经确立的"模态遮罩"视觉语言，两个模态面板压出的观感一致。
  */
 private const val SHEET_SCRIM_ALPHA = 0.72f
+
+/**
+ * `focusRequester.requestFocus()` 第一次调用失败（面板刚进组合，`TextArea` 内部
+ * `BasicTextField` 的 focus 子树可能还没挂完）时，重试前的等待——只重试这一次，不是一个
+ * 等条件成立的循环，见下面 `LaunchedEffect` 处的说明。不用 `withFrameNanos`：本项目已经
+ * 证实它在 `DefaultWindowContainer` 里只触发一次、之后再也不跑（`AGENTS.md`），这里改用
+ * `delay`。取值只需要明显小于用户能感知的延迟，不是一个需要在真机上标定的手感数字。
+ */
+private const val FOCUS_RETRY_DELAY_MS = 32L
 
 /**
  * 文字工具的输入面板：点画布定位之后弹出，`TextArea` 收系统输入法打进来的文字，
@@ -107,34 +141,53 @@ fun TextInputSheet(state: EditorState, modifier: Modifier = Modifier) {
     // 显式读出来传给 measureTextLayout（1b-2 复审修复项）：与 CanvasSurface.kt 同一份修复的
     // 另一半，两个调用方都不再依赖 measurer 自带的默认 resolver。
     val fontFamilyResolver = LocalFontFamilyResolver.current
-    val focusManager = LocalFocusManager.current
 
     // 面板刚出现时抓一次焦点，系统 IME 才会跟着自动弹出（1b-2 复审修复项）——面板出现前用户
     // 必须先手动点一下 TextArea 才能开始打字，现在打字可以立刻开始。
     //
-    // 没有用标准的 `FocusRequester` + `Modifier.focusRequester(...)`：那套机制要求 requester
-    // 和真正的 `focusTarget()` 落在同一条 modifier 链上，但 `com.pico.spatial.ui.design`
-    // 6.0.0 的 `TextArea`（源码见 design-6.0.0-sources.jar 的 `TextField.kt`）把外部传入的
-    // `modifier` 参数用在最外层的 `BoxWithConstraints` 上，内部真正调用
-    // `com.pico.spatial.ui.design.text.BasicTextField` 时用的是它自己另起的一个固定
-    // `Modifier`——外部 `modifier` 根本不会流到那个真正持有 `focusTarget()` 的节点，挂在
-    // `TextArea(modifier = ...)` 上的 `FocusRequester` 因此找不到目标，`requestFocus()` 会是
-    // 静默空操作。改用 `LocalFocusManager.moveFocus`：不需要拿到目标节点的引用，只要面板刚
-    // 出现、整个应用当前没有任何键盘焦点（PICO 的按钮/色板走的是控制器射线选中，不是标准 Compose
-    // 键盘焦点系统，`TextArea` 内部的 `BasicTextField` 目前是这条 focus 链路上唯一的参与者），
-    // `moveFocus(Next)` 就会落在焦点顺序里的第一个可聚焦节点上——本面板里 `TextArea` 排在
-    // 取消/确认按钮之前，因此这一次调用落在它上面。
+    // 用标准的 `FocusRequester` + `Modifier.focusRequester(...)` 挂在 `TextArea(modifier = ...)`
+    // 上（1b-2 复审修复项 B，纠正上一版的结论）。上一版认为这条路径是死的：
+    // `com.pico.spatial.ui.design` 6.0.0 的 `TextArea`（源码见 design-6.0.0-sources.jar 的
+    // `TextField.kt` 第 164 行）确实把外部传入的 `modifier` 用在最外层的
+    // `BoxWithConstraints(modifier = modifier)` 上，不是直接挂在内部真正持有 `focusTarget()`
+    // 的 `BasicTextField` 节点上——这一半观察是对的。但由此推出"`FocusRequester` 因此找不到
+    // 目标、`requestFocus()` 是静默空操作"是错的：挂在一个不可聚焦的祖先节点上的
+    // `Modifier.focusRequester` 不是空操作，这是标准 Compose 焦点语义、不是这个设计系统的特例——
+    // `requestFocus()` 会沿着这个节点的焦点子树往下找，委托给子树里第一个可获得焦点的目标，
+    // 而 `BasicTextField` 恰好就在这棵子树里。用 `LocalFocusManager.moveFocus(Next)` 反而更脆弱：
+    // 它依赖组合顺序（`ToolBar` 在 `BoardEditor.kt` 里比这个面板先组合，"下一个可聚焦节点"完全
+    // 可能落在工具栏的某个按钮上，不是这里的 `TextArea`）和 effect 的调度时序（面板必须先被
+    // 放置好，`moveFocus` 才有一个已经存在的焦点树可以走）,两个前提都不是这段代码自己能保证的。
+    //
+    // 面板出现的那一刻，`TextArea` 的 focus 子树有没有真的挂上还有一次调度延迟的不确定性
+    // （面板刚进组合、`BasicTextField` 的 `focusTarget()` 节点可能还没完成挂载），第一次
+    // `requestFocus()` 因此可能落空。这里只重试一次、用固定的短延迟——不是一个等条件成立的
+    // 循环：重试次数在代码里是写死的两次调用，不存在"一直不获得焦点就一直重试"的循环路径。
+    val focusRequester = remember { FocusRequester() }
     LaunchedEffect(Unit) {
-        focusManager.moveFocus(FocusDirection.Next)
+        focusRequester.requestFocus()
+        delay(FOCUS_RETRY_DELAY_MS)
+        focusRequester.requestFocus()
     }
 
     // 换行宽度依赖锚点位置（见 wrapBoardFor 的说明），只在锚点第一次出现时算一次；锚点在这个
     // 面板存活期间不会变（提交/取消都会让 state.pendingTextAnchor 变 null、面板整体消失）。
-    val wrapBoard = wrapBoardFor(anchor.x)
-    // 卡面避开锚点所在的半区（见类注释「卡面避开锚点」）：CANVAS_H 是画布逻辑高度的中线，
-    // 不是屏幕像素中线——这与 anchor 本身的坐标系一致，也是用户决策原文里"画布上/下半区"
-    // 的字面含义，不需要经过 viewport 再换算成屏幕坐标。
-    val sheetAlignment = if (anchor.y < Viewport.CANVAS_H / 2f) Alignment.BottomCenter else Alignment.TopCenter
+    //
+    // 先测出「一行有多高」（1b-2 复审修复项 C 的输入之一）：拿一个必然不会换行的短样本
+    // （宽度给到 MIN_WRAP_BOARD，远宽于一个字符）在 TEXT_SIZE_BOARD 字号下量一次，量出的是
+    // 真实的一行高度，不是"字号 × 某个猜的行高倍数"——字体的行高倍数不是这个项目验证过的数,
+    // 这里量比猜更站得住。measurer/fontFamilyResolver 在这个面板存活期间不变，用 remember 避免
+    // 每次 `pendingText` 变化（每敲一个字都会重组这个 Composable）都重新量一次。
+    val oneLineBoard = remember(measurer, fontFamilyResolver) {
+        measureTextLayout("字", TEXT_SIZE_BOARD, MIN_WRAP_BOARD, measurer, fontFamilyResolver)
+            .size.height.toFloat()
+    }
+    // 锚点再收紧一次（见 containAnchor 的说明）：横向至少留出 MIN_WRAP_BOARD、纵向至少留出
+    // oneLineBoard，保证不会提交一个从落地那一刻起就整段在纸面外、谁也看不见删不掉的 TextItem。
+    // 下面 wrapBoard/sheetAlignment/commitText 全部读这个收紧过的锚点，不再读原始 anchor——
+    // 两处若各读一份,纸面边缘的失踪文字就会重新出现。
+    val safeAnchor = containAnchor(anchor, oneLineBoard)
+    val wrapBoard = wrapBoardFor(safeAnchor.x)
 
     fun commitText(raw: String) {
         val text = raw.trim()
@@ -152,7 +205,7 @@ fun TextInputSheet(state: EditorState, modifier: Modifier = Modifier) {
                     text = text,
                     colorArgb = state.colorArgb,
                     sizeBoard = TEXT_SIZE_BOARD,
-                    anchor = anchor,
+                    anchor = safeAnchor,
                     // 换行约束——多宽该折行，喂进 measureTextLayout 的那个数，跟渲染时用的必须
                     // 是同一个值（否则换行结果会不一致），但它不是这段文字实际有多宽。
                     wBoard = wrapBoard,
@@ -171,17 +224,34 @@ fun TextInputSheet(state: EditorState, modifier: Modifier = Modifier) {
         state.cancelTextPlacement()
     }
 
-    Box(
+    // `BoxWithConstraints` 而不是 `Box`：卡面该出现在上半区还是下半区（1b-2 复审修复项 D）
+    // 需要知道锚点此刻在**屏幕**上的位置，不能只看它在画布逻辑坐标（`[0,CANVAS_H]`）里的位置——
+    // 上一版直接拿 `anchor.y < CANVAS_H / 2f` 判断，锚点坐标是文档坐标、这个面板卡面却是在屏幕
+    // 空间摆放，视口一旦平移或缩放过，同一个锚点在文档坐标系里落在哪一半和它此刻实际显示在屏幕
+    // 哪一半就会不一致——用户点在自己肉眼看见的下半屏，却因为文档坐标算出来是"上半区"而把卡面
+    // 摆到下半屏，正好糊住刚点的位置，违反"卡面避开锚点"这条要求本身。修法是换算成屏幕坐标再判断：
+    // `state.viewport.toScreenY(...)` 用的是与手势读取（`CanvasSurface` 的 `toBoard`）、绘制
+    // （`BoardDrawing.kt` 的 `withTransform`）同一份 `offset`/`scale`；`maxHeight` 来自这个
+    // `BoxWithConstraints` 自身——它和 `BoardEditor.kt` 里的根 Box 一样铺满整个编辑器窗口，取它的
+    // `maxHeight` 近似整个窗口的可见高度（与 `canvas.viewport` 的实际高度只差左侧 12dp 内边距，
+    // 数量级远小于这个二分判断关心的"上半/下半"，不影响这个判断的正确性）。
+    BoxWithConstraints(
         modifier = modifier
             .fillMaxSize()
             // 主题角色不透明，遮罩底色必须自己 copy(alpha)。
             .background(scheme.fillSecondary.copy(alpha = SHEET_SCRIM_ALPHA))
             // 必须消费指针事件，否则点击会穿透遮罩点亮下层工具栏（与 ClearConfirmOverlay 同一条教训）。
             .consumeAllPointerEvents(),
-        contentAlignment = sheetAlignment,
     ) {
+        // 卡面避开锚点所在的半区（见类注释「卡面避开锚点」），现在按锚点的屏幕 y 坐标判断，
+        // 不再按画布逻辑坐标判断（见上面 BoxWithConstraints 的说明）。
+        val anchorScreenY = state.viewport.toScreenY(safeAnchor.y)
+        val sheetAlignment =
+            if (anchorScreenY < maxHeight.value / 2f) Alignment.BottomCenter else Alignment.TopCenter
+
         Column(
             modifier = Modifier
+                .align(sheetAlignment)
                 .width(SHEET_WIDTH)
                 .clip(RoundedCornerShape(SHEET_RADIUS))
                 .background(scheme.fillSecondary)
@@ -194,7 +264,8 @@ fun TextInputSheet(state: EditorState, modifier: Modifier = Modifier) {
             TextArea(
                 value = state.pendingText,
                 onValueChange = { state.pendingText = it },
-                modifier = Modifier.fillMaxWidth().heightIn(min = SHEET_INPUT_MIN_H),
+                modifier = Modifier.fillMaxWidth().heightIn(min = SHEET_INPUT_MIN_H)
+                    .focusRequester(focusRequester),
                 placeholder = { Text("输入文字…", style = typography.bodyLarge) },
             )
             Spacer(Modifier.height(22.dp))

@@ -108,9 +108,37 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
             // 一次性锁存成一个 ActiveStyle，其余回调只读它，不再读 state.tool 等实时字段。
             // 锁存值放在 state 里（而不是只放手势协程的局部变量），是因为下面 draw lambda
             // 里的实时预览也要读同一份 —— 局部变量它读不到，读实时字段又会和提交值分叉。
-            // 这也是 pointerInput 必须留 Unit 作 key 的另一个理由：Key 变化会重建协程、
-            // 把 active 重新初始化为 null，等于把"锁存"整个作废。
-            .pointerInput(Unit) {
+            // 这本来是 pointerInput 必须留 Unit 作 key 的理由：Key 变化会重建协程、把 active
+            // 重新初始化为 null，等于把"锁存"整个作废——这条理由本身没有过期，下面把 key 换成
+            // `state.tool == Tool.Text` 之后仍然成立，见下一段。
+            //
+            // key 从 Unit 改成 `state.tool == Tool.Text`（1b-2 复审修复项 A）：这个拖拽检测器
+            // 在 Tool.Text 被选中时其实什么都不做（onDragStart/onDragEnd/onDrag 的 Tool.Text
+            // 分支全是 Unit），但只要节点还常驻，`detectSpatialDragGesture` 内部的
+            // `awaitForDragStart` 依然在参与仲裁同一批指针事件——源码见 foundation-6.0.0
+            // sources jar 的 `SpatialDragGestureDetector.kt`：`change.consume()` 挂在
+            // `onSpatialDragStart` 回调里，只在 `isMove && spatialDragData != null && dragging`
+            // （`dragging` = 运行时报告 BEGIN/DRAGGING）时才会触发。下面第二个 pointerInput 的
+            // `detectSpatialTapGesture`（`awaitAllUpOrCancelEvent`）在主传递与
+            // `PointerEventPass.Final` 两个通道上都会检查 `changes.fastAny { it.isConsumed }`，
+            // 一旦命中就返回 null、取消这次 tap。于是一次原地不动的点击（什么都不 consume）能
+            // 正常落地文字，但运行时判定为"有拖拽倾向"的按压会被这个仍然存活的拖拽节点抢先
+            // consume 掉，tap 静默被取消——现象是文字放置"有时候不生效"，和上一版修的问题是
+            // 同一类"看不出规律的静默空操作"，只是触发条件更窄。
+            //
+            // 用 `state.tool == Tool.Text` 当 key、在块内 `if (state.tool == Tool.Text)
+            // return@pointerInput` 提前退出，跟下面第二个 pointerInput（文字点击定位，同一个
+            // `state.tool == Tool.Text` key、但条件取反）互为镜像：工具切成 Text 时这个节点被整个撤下
+            // 仲裁，两个检测器不会再抢同一次按下。上一段"Unit 作 key"的理由并未因此失效——
+            // Pen/Shape/Eraser/Pan 四个非文字工具之间互相切换，这个 key 表达式永远算出
+            // `false`，Compose 不会重建协程，`active` 锁存照样在这些切换之间存活；key 只会在
+            // "非文字 ↔ 文字"这一种切换上翻转。而 Pen 手势进行中切到 Text（或反过来）这件事
+            // 本身不可能发生：要切工具就要先松开指针点到工具栏按钮，松开的那一刻当前手势已经
+            // 通过 onDragEnd/onDragCancel 走完，不存在"协程被重建、锁存被作废"的那一笔还挂着的
+            // 情形。下一个读到这段代码的人不要把 key 改回 Unit——那会让这个节点在 Text 工具下
+            // 复活，重新引入上面这段静默取消。
+            .pointerInput(state.tool == Tool.Text) {
+                if (state.tool == Tool.Text) return@pointerInput
                 // 累加游标，屏幕像素空间。
                 // 只在 onDragStart 读一次绝对 offset，之后全靠累加 dragAmount ——
                 // PICO 的注视+捏合交互里，拖拽中重读绝对坐标反映的是几乎不动的注视点，不是手的位移。
