@@ -41,7 +41,7 @@ data class TransformItem(val before: Item, val after: Item) : Op {
  * group may be inserted in the wrong layer order. Example: starting from [A, B, C, D], if A becomes
  * two fragments [a0, a1] and C becomes [c0, c1], the correct indices are a0:0, a1:1, c0:3, c1:4
  * (final positions). Passing c0:2, c1:3 (original C position + offset) instead would produce
- * [a0, a1, c0, B, c1, D] — B gets shoved between fragments of C. Callers must compute final indices
+ * [a0, a1, c0, c1, B, D] — B is pushed after all of C's fragments. Callers must compute final indices
  * by accounting for all earlier removals and insertions.
  *
  * **Id uniqueness assumption:** [added] item ids must not collide with ids of surviving items
