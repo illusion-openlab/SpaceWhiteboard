@@ -9,6 +9,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke as StrokeStyle
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.withTransform
 import tech.illusion.spacewhiteboard.board.*
 
@@ -42,6 +43,32 @@ fun DrawScope.drawPaper(viewport: Viewport, density: Float, color: Color, corner
     )
 }
 
+/**
+ * 把墨迹绘制裁到纸面矩形内（board 坐标 `(0,0)`–`(CANVAS_W,CANVAS_H)`）。
+ *
+ * 平移/缩放不会限制用户在哪里落笔——一旦视口挪开、画布之外的根背景露出来，
+ * `toBoard()` 换算出的坐标就会落在 `[0,2400]×[0,1600]` 之外，笔画/形状会被画在
+ * 纸面以外，浮在根背景上、看不出「纸面之外是根底色」（契约 §6 通用检查第 4 条）。
+ *
+ * 修法是**裁剪渲染，不裁剪坐标**：已提交数据、`livePoints`、`liveShapeStart/End`
+ * 里存的仍然是用户实际画的原始 board 坐标，一根斜着穿出纸面边界的线不会被夹平在
+ * 边界上变形——夹坐标会把「画出去的那一段」直接钳死在边线上，永久损坏这一笔的几何。
+ * 裁剪只影响这一帧怎么画，不改一个像素的已存数据。
+ *
+ * 之所以传 board 坐标的矩形而不是屏幕像素矩形：调用点全部在 `withTransform` 内部
+ * （已经把 board 坐标系变换到屏幕坐标系），`clipRect` 在当前坐标系下裁剪，此处
+ * 当前坐标系就是 board units，直接传 `(0, 0, CANVAS_W, CANVAS_H)` 即可，不需要
+ * 再乘 density/scale 换算——这也是导出路径（Task 18 `BoardRenderer`，用内容包围盒
+ * 构造的另一个 `Viewport` 调同一批函数）会自动裁在同一条边界上的原因：裁剪矩形
+ * 写在 board 坐标里，不依赖调用方的 viewport/density 取值，屏幕渲染和导出用的是
+ * 同一份变换 + 同一份裁剪，两条路径不可能裁出不同的结果。
+ */
+private inline fun DrawScope.clipToPaper(block: DrawScope.() -> Unit) {
+    clipRect(left = 0f, top = 0f, right = Viewport.CANVAS_W, bottom = Viewport.CANVAS_H) {
+        block()
+    }
+}
+
 fun DrawScope.drawBoard(
     doc: BoardDoc,
     viewport: Viewport,
@@ -52,18 +79,20 @@ fun DrawScope.drawBoard(
         translate(viewport.offsetX * density, viewport.offsetY * density)
         scale(viewport.scale * density, viewport.scale * density, pivot = Offset.Zero)
     }) {
-        for (item in doc.items) {
-            when (item) {
-                is Stroke -> {
-                    if (item.points.size == 1) {
-                        drawCircle(Color(item.colorArgb), item.widthDp / 2f,
-                            Offset(item.points[0].x, item.points[0].y))
-                    } else {
-                        val path = pathCache.getOrPut(item.id) { buildStrokePath(item.points) }
-                        drawPath(path, Color(item.colorArgb), style = inkStyle(item.widthDp))
+        clipToPaper {
+            for (item in doc.items) {
+                when (item) {
+                    is Stroke -> {
+                        if (item.points.size == 1) {
+                            drawCircle(Color(item.colorArgb), item.widthDp / 2f,
+                                Offset(item.points[0].x, item.points[0].y))
+                        } else {
+                            val path = pathCache.getOrPut(item.id) { buildStrokePath(item.points) }
+                            drawPath(path, Color(item.colorArgb), style = inkStyle(item.widthDp))
+                        }
                     }
+                    is ShapeItem -> drawShape(item)
                 }
-                is ShapeItem -> drawShape(item)
             }
         }
     }
@@ -82,10 +111,12 @@ fun DrawScope.drawLiveStroke(
         translate(viewport.offsetX * density, viewport.offsetY * density)
         scale(viewport.scale * density, viewport.scale * density, pivot = Offset.Zero)
     }) {
-        if (points.size == 1) {
-            drawCircle(Color(colorArgb), widthDp / 2f, Offset(points[0].x, points[0].y))
-        } else {
-            drawPath(buildStrokePath(points), Color(colorArgb), style = inkStyle(widthDp))
+        clipToPaper {
+            if (points.size == 1) {
+                drawCircle(Color(colorArgb), widthDp / 2f, Offset(points[0].x, points[0].y))
+            } else {
+                drawPath(buildStrokePath(points), Color(colorArgb), style = inkStyle(widthDp))
+            }
         }
     }
 }
@@ -99,7 +130,9 @@ fun DrawScope.drawLiveShape(
         translate(viewport.offsetX * density, viewport.offsetY * density)
         scale(viewport.scale * density, viewport.scale * density, pivot = Offset.Zero)
     }) {
-        drawShapeGeometry(kind, a, b, colorArgb, widthDp)
+        clipToPaper {
+            drawShapeGeometry(kind, a, b, colorArgb, widthDp)
+        }
     }
 }
 
