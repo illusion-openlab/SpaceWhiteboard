@@ -45,6 +45,7 @@ object HitTest {
             val hit = when (item) {
                 is Stroke -> strokeHit(item, p, radius)
                 is ShapeItem -> shapeHit(item, p, radius)
+                is TextItem -> false   // 橡皮只作用于墨水类；文字要靠选择工具删除（阶段 1b-4）
             }
             if (hit) IndexedItem(i, item) else null
         }

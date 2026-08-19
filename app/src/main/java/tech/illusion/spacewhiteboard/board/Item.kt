@@ -41,3 +41,26 @@ data class ShapeItem(
 ) : Item {
     override fun bounds(): BoardRect = BoardRect.of(a, b)
 }
+
+/**
+ * 画布上的一段文字。
+ *
+ * [sizeBoard] 与 [wBoard] / [hBoard] 都是**画布单位**，不是 sp/dp —— 白板上的文字是画布内容，
+ * 应当随缩放一起变换。用 sp 会让它在屏幕上恒定大小，放大画布时相对内容越来越小。
+ *
+ * [wBoard] / [hBoard] 是**创建时由 UI 层测量后存下来的**占位尺寸。`board/` 不能依赖 Compose，
+ * 因此无法在这里重新测量。若渲染时的字体度量与创建时不同，存下的尺寸会有偏差；它只用于
+ * [bounds]（进而 `contentBounds` 与 PNG 导出裁切），这点偏差可以接受。
+ */
+data class TextItem(
+    override val id: ItemId,
+    val text: String,
+    val colorArgb: Int,
+    val sizeBoard: Float,
+    val anchor: Pt,
+    val wBoard: Float,
+    val hBoard: Float,
+) : Item {
+    override fun bounds(): BoardRect =
+        BoardRect(anchor.x, anchor.y, anchor.x + wBoard, anchor.y + hBoard)
+}

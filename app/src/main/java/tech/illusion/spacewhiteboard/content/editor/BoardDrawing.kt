@@ -119,6 +119,7 @@ fun DrawScope.drawBoard(
                         }
                     }
                     is ShapeItem -> drawShape(item)
+                    is TextItem -> Unit // 真正的绘制由 Task 3 补上；此刻无法创建 TextItem，空分支不产生可感知状态
                 }
             }
         }

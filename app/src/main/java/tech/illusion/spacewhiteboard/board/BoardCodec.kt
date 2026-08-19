@@ -33,6 +33,7 @@ object BoardCodec {
                         .append(' ').append(item.b.x).append(',').append(item.b.y)
                         .append('\n')
                 }
+                is TextItem -> Unit // 真正的编码由 Task 2 补上；此刻无法创建 TextItem，占位不会丢失数据
             }
         }
     }

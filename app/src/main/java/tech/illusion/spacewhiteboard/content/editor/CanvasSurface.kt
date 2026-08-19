@@ -350,6 +350,7 @@ private fun fragmentsOf(state: EditorState, item: Item, center: Pt, radiusBoard:
     when (item) {
         is Stroke -> { points = item.points; colorArgb = item.colorArgb; widthDp = item.widthDp }
         is ShapeItem -> { points = ShapeOutline.toPoints(item, radiusBoard); colorArgb = item.colorArgb; widthDp = item.widthDp }
+        is TextItem -> return null // 橡皮不会命中文字（HitTest.eraseHits 已排除），此分支不可达，仅为满足穷尽性
     }
     val runs = StrokeSplit.split(points, center, radiusBoard)
     if (runs.size == 1 && runs[0].size == points.size) return null
