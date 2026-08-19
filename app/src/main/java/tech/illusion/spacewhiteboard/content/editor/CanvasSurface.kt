@@ -42,8 +42,9 @@ private const val MIN_SHAPE_SIZE = 4f
 /** 橡皮命中半径，board units。 */
 private const val ERASER_RADIUS = 12f
 
-/** `canvas.paper` 圆角，屏幕空间固定 dp（契约 §2.2）。不随 viewport.scale 缩放，见 [drawPaper]。 */
-private const val PAPER_RADIUS_DP = 6f
+// `canvas.paper` 圆角常量（契约 §2.2，6dp，不随 viewport.scale 缩放）已经内收进
+// `BoardDrawing.kt` 的 `PAPER_CORNER_RADIUS_DP`——`drawPaper` 与 `clipToPaper` 现在读的是
+// 同一个常量，这里不再重复定义一份，避免两处数值不小心分叉（Task 20 修复项）。
 
 @Composable
 fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
@@ -54,10 +55,12 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
     // 笔尖游标：Pen 拖拽进行中，"系统认为落墨点在哪"（board units）；没有 Pen 拖拽时为
     // null、不画。用 mutableStateOf 而不是手势协程里的局部变量，原因和 state.livePoints
     // 一样——下面 Canvas 的 draw lambda 要在另一处读它来画游标，局部变量读不到。
-    // 只做 state 1（拖拽中）：detectSpatialPointerEvent 与 detectSpatialDragGesture 能否
-    // 在同一个元素上稳定共存，SDK 文档/示例里找不到二者同时使用的例子，本轮又不安装到
-    // 设备验证，没法拿到运行时证据；宁可不做 state 2（悬停中）也不要拿"猜的"悬停位置
-    // 糊弄用户——这正是本次要修的那类问题。
+    // 只做 state 1（拖拽中）：真机实验（分支 experiment/pointer-absolute，见 AGENTS.md
+    // 「指针模型实验与被否定的假设」）已经证明 detectSpatialPointerEvent 与
+    // detectSpatialDragGesture 可以在同一个元素上共存（两者都能触发），所以这不再是一个
+    // "不知道行不行"的技术未知项。state 2（悬停中）没做纯粹是范围裁剪——本轮改动集中在
+    // 拖拽路径，悬停游标是独立的一块工作量（接线悬停事件、决定悬停态的视觉区分），放到
+    // 下一轮再做，不是拿"猜的"悬停位置糊弄用户。
     val dragCursorBoard = remember { mutableStateOf<Pt?>(null) }
 
     Canvas(
@@ -203,7 +206,7 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
             },
     ) {
         // canvas.paper：先画纸面矩形，再叠已提交内容与实时预览——纸面是底，墨迹在纸上。
-        drawPaper(state.viewport, density, scheme.fillTertiary, PAPER_RADIUS_DP)
+        drawPaper(state.viewport, density, scheme.fillTertiary)
         // 阈值式清理被擦掉对象留下的失效 Path 缓存条目：只在缓存明显超量时才重建一次存活 key 集合，
         // 避免在没有擦除发生的常态下每帧都做一次全量 Set 构建。
         if (pathCache.size > state.doc.items.size * 2) {

@@ -127,7 +127,7 @@ h <Line|Rect|Ellipse> <argb8位小写hex> <widthDp> <x>,<y> <x>,<y>
 - **撤销按钮的启用/禁用对比度太弱**，用户在真机上几乎看不出差异。根因是渲染层面而非逻辑层面（`canUndo` 状态本身正确翻转，已用 DIAG 日志证实）：`ActionButton` 用 `labelSecondary`（已经偏暗）叠加 `LocalDisableAlpha` 的 0.3 倍透明度，而"清空"按钮额外把文字换成红色所以看得出来,撤销/重做没有这层额外区分。候选修法：启用态改用更亮的 `labelPrimary`,让 0.3 倍透明度有东西可以压暗。位置：`content/editor/ToolBar.kt`。
 - **椭圆的橡皮擦命中测试用包围盒近似**，不是精确的椭圆边界。在包围盒四角附近有约 `0.41 × min(rx, ry)` 的误判区——在一个 200×200 的椭圆上，用户可能在视觉上完全空白的区域扫过就把它擦掉。这条没有被任何测试锁定，可以自由改进。位置：`board/HitTest.kt`。
 - **导出 PNG 的位图尺寸没有上限。** 最坏情况（内容铺满整张 2400×1600 逻辑画布 + 2× 导出倍率）是 4800×3200 `ARGB_8888`，约 58.6 MiB，故意不加裁剪/分块处理（一次性、用户触发、跑在 IO 线程）。如果真机上观察到 OOM 或明显卡顿再引入降采样或分块渲染，不要提前基于猜测处理。位置：`export/BoardRenderer.kt`。
-- **没有实现悬停游标。** 笔尖游标目前只覆盖"拖拽进行中"这一种状态；`detectSpatialPointerEvent`（悬停/未按下）与 `detectSpatialDragGesture` 能否在同一元素上稳定共存缺少 SDK 文档/示例证据，本轮又没有装机验证的余地，所以宁可不做这一半、也不用猜测的悬停位置误导用户。位置：`content/editor/CanvasSurface.kt` 顶部注释里有完整的决策记录。
+- **没有实现悬停游标。** 笔尖游标目前只覆盖"拖拽进行中"这一种状态。上文「指针模型实验与被否定的假设」已经证明 `detectSpatialPointerEvent`（悬停/未按下）与 `detectSpatialDragGesture` 可以在同一元素上共存（两者都能触发）——这不再是共存性未知项，纯粹是本轮范围裁剪：接线悬停事件、设计悬停态的视觉区分是独立工作量，留到下一轮再做。位置：`content/editor/CanvasSurface.kt` 顶部注释里有完整的决策记录。
 
 ## 环境变量（每条 Bash 调用都要自己 export，`~/.zshrc` 不会被自动 source）
 

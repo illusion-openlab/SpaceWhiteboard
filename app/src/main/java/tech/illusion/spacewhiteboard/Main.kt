@@ -80,6 +80,19 @@ fun mainApp(scope: SpatialAppScope) =
                 var saveStatus by remember { mutableStateOf(SaveStatus.Idle) }
                 AutoSave(state = state, store = store) { saveStatus = it }
 
+                // 存档部分损坏（skippedLines > 0）时的常驻提示文案。只在这里算一次而不是在
+                // DegradedLoadNotice 内部算，是因为 Corrupt 与「Ok 但部分行被跳过」是两种不同的
+                // LoadResult 分支，各自的文案输入不同（备份路径 vs 跳过行数），但共享同一条
+                // 常驻横条视觉——见下方 DegradedLoadNotice 的说明。
+                val partialLoadMessage = (loaded as? LoadResult.Ok)?.takeIf { it.skippedLines > 0 }
+                    ?.let { ok ->
+                        // 契约没有为这种情况定义文案（§4 只给了「存档整体损坏」一条），这里
+                        // 遵循同一套写法：先说清楚发生了什么，再说清楚继续操作会有什么后果——
+                        // 用户必须在动笔之前就知道这份文档已经不完整，而不是等保存之后才发现。
+                        "上次的白板文件部分内容无法读取，已跳过 ${ok.skippedLines} 处无法解析的" +
+                            "记录，继续绘制并保存将只保留已成功载入的内容。"
+                    }
+
                 Box(Modifier.fillMaxSize()) {
                     BoardEditor(
                         state = state,
@@ -116,10 +129,14 @@ fun mainApp(scope: SpatialAppScope) =
                         },
                     )
 
-                    // 存档损坏：用户有权知道自己的东西没了、以及备份在哪。这条常驻提示条
-                    // 不是 Snackbar——不会自己消失，只要本次会话还在损坏状态就一直显示。
-                    if (loaded is LoadResult.Corrupt) {
-                        CorruptNotice(loaded, boardFile)
+                    // 存档损坏 / 部分损坏：用户有权知道自己的东西没了多少、以及备份在哪。
+                    // 这条常驻提示条不是 Snackbar——不会自己消失，只要本次会话还在这个状态
+                    // 就一直显示。两种触发条件互斥（Corrupt 与 Ok 是同一个 sealed interface
+                    // 的不同分支），最多同时出现一条。
+                    when (loaded) {
+                        is LoadResult.Corrupt -> DegradedLoadNotice(corruptMessage(loaded, boardFile))
+                        is LoadResult.Ok -> partialLoadMessage?.let { DegradedLoadNotice(it) }
+                        is LoadResult.Empty -> Unit
                     }
                 }
             }
@@ -127,25 +144,32 @@ fun mainApp(scope: SpatialAppScope) =
     }
 
 /**
- * 存档损坏时的常驻提示条。契约 §11 歧义 #4 与 §4 文案表给的是 Snackbar 文案（转瞬即逝、
- * 也不含备份路径），但 Task 17 明确要求"持久、非 toast、必须点名备份路径"——用户的全部
- * 作品可能已经丢失，静默给一块空白白板是最糟的处理方式，所以这里不复用 Snackbar 文案，
- * 换成一条不会自动消失、点名备份路径的横条。
+ * `LoadResult.Corrupt` 分支的文案（存档整体损坏，无法解码）。契约 §11 歧义 #4 与 §4 文案表
+ * 给的是 Snackbar 文案（转瞬即逝、也不含备份路径），但 Task 17 明确要求"持久、非 toast、
+ * 必须点名备份路径"——用户的全部作品可能已经丢失，静默给一块空白白板是最糟的处理方式。
+ */
+private fun corruptMessage(corrupt: LoadResult.Corrupt, originalFile: File): String =
+    if (corrupt.backupPath != null) {
+        "上次的白板文件无法读取，已另存备份，当前是一块新白板。备份路径：${corrupt.backupPath}"
+    } else {
+        // 连备份都没能写成功（比如磁盘已满）：原文件此刻还在原地，没被覆盖或删除——但仅仅是
+        // "此刻"：AutoSave 的 ON_PAUSE 强制 flush 现在已经守卫了 state.revision == 0
+        // （见 content/editor/AutoSave.kt），本次会话不碰一笔画就不会覆盖它，原文件才能真的
+        // 保住，而不是"再撑一次 pause 就没了"。把原路径告诉用户比什么都不说要好。
+        "上次的白板文件无法读取，备份也未能保存，当前是一块新白板。原文件路径：${originalFile.path}"
+    }
+
+/**
+ * 存档退化（整体损坏 / `BoardCodec.decode` 部分行被跳过）时的常驻提示条，两种情况共用同一条
+ * 横条视觉，只是文案不同（由调用方算好传入）。
  *
  * 没有关闭按钮：契约的元素清单里没有这个控件，加一个新的可交互元素超出本任务范围；
  * "常驻"在这里就是字面意思——贯穿本次会话，直到应用重启（下次若能正常载入就不会再出现）。
  */
 @Composable
-private fun CorruptNotice(corrupt: LoadResult.Corrupt, originalFile: File) {
+private fun DegradedLoadNotice(message: String) {
     val scheme = PicoTheme.colorScheme
     val typography = PicoTheme.typography
-    val message = if (corrupt.backupPath != null) {
-        "上次的白板文件无法读取，已另存备份，当前是一块新白板。备份路径：${corrupt.backupPath}"
-    } else {
-        // 连备份都没能写成功（比如磁盘已满）：原文件至少还在原地，没被覆盖或删除，
-        // 把原路径告诉用户比什么都不说要好。
-        "上次的白板文件无法读取，备份也未能保存，当前是一块新白板。原文件路径：${originalFile.path}"
-    }
     // 没有用 Modifier.align(...)：这是个独立的顶层 @Composable，不在外层 BoxScope 的
     // lambda receiver 里，align 这个 BoxScope 扩展在这里不可用。直接 fillMaxWidth() 已经
     // 能让这条横条贴在外层 Box 的顶部、撑满宽度——外层 Box 的默认 contentAlignment 就是

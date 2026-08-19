@@ -49,12 +49,18 @@ dependencies {
     implementation(libs.spatial.ui.design)
     implementation(libs.spatial.ui.sense)
     implementation(libs.spatial.ui.tracking)
-    implementation(libs.androidx.ui.tooling)
     implementation(libs.androidx.annotation)
     implementation(libs.androidx.appcompat)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
+    // ui-tooling 只在 Debug 构建里需要（Compose 预览/布局审查工具），它会把
+    // androidx.compose.material:material 拉进依赖图；配置块下方 exclude 列表覆盖不到它
+    // （只排除了 ui / ui-graphics / ui-text / foundation 四个模块，material 不在其中），
+    // implementation 会让它连同这条 material 依赖一起出现在 releaseRuntimeClasspath 上,
+    // 违反本项目"零 Material"的硬约束——即使源码里一行 Material import 都没有,产物里也有。
+    // debugImplementation 把它限制在 Debug 变体,release 变体的依赖图里就不会再出现。
+    debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.tooling.preview)
 }
 
