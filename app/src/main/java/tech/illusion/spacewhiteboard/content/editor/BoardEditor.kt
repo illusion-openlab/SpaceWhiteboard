@@ -135,6 +135,13 @@ fun BoardEditor(
             }
         }
 
+        // `textInputSheet`：文字工具点击定位之后出现，取消/确认（含空白文本）都会让
+        // `pendingTextAnchor` 变回 null，浮层随之消失——跟 `clearDialog` 一样是根 Box 的兄弟
+        // 节点，盖满整个编辑器窗口。
+        if (state.pendingTextAnchor != null) {
+            TextInputSheet(state)
+        }
+
         // `clearDialog`：清空可撤销，但误触清空整块白板的心理代价远高于多点一次。
         if (confirmingClear) {
             ClearConfirmOverlay(

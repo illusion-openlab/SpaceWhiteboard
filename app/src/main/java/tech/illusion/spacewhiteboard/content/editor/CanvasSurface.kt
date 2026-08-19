@@ -121,6 +121,15 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                 /** eraseBaseline 里全部对象的 id 集合，随 eraseBaseline 一起设置——用来判断
                  *  一次命中触碰的是基准原始对象，还是本次拖拽中途已经切出来的碎片。 */
                 var eraseBaselineIds: Set<ItemId> = emptySet()
+                /**
+                 * 文字工具本次手势的起点（画布坐标），只在 `Tool.Text` 手势中使用。
+                 * 定位靠"点击而不是拖拽"（brief 要求）：`detectSpatialDragGesture` 眼里一次点击
+                 * 就是起点与终点几乎重合的一次拖拽，所以复用 [MIN_SHAPE_SIZE] 那套误触判定的
+                 * 阈值——只是判定方向相反：Shape 用它排除"距离太近、可能是误触"的假形状；这里用
+                 * 它确认"距离足够近，这确实是一次点击"才弹出输入面板，拖出去视为用户改主意，
+                 * 不弹面板（也不留任何锚点/Op）。不存进 EditorState：文字工具在拖拽进行中不需要
+                 * 任何实时预览，局部变量就够，onDragEnd 用完随即清空。 */
+                var textAnchorBoard: Pt? = null
                 /** 本次擦除动作累积「碰过的基准对象」的 id；松手时据此从 eraseBaseline 换算
                  *  ReplaceItems.removed。碎片本身不进这个集合——它们的最终形态要等松手时
                  *  按 doc 终态收集（见 finishEraseBatch），不能在产生的当下就记下来，因为
@@ -155,6 +164,9 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                                 dragCursorTool.value = Tool.Eraser
                                 eraseAt(state, p, eraserRadiusBoard(density, state.viewport), eraseBaselineIds, touchedBaselineIds)
                             }
+                            Tool.Text -> {
+                                textAnchorBoard = p
+                            }
                             Tool.Pan -> Unit
                         }
                     },
@@ -187,6 +199,17 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                                 eraseBaseline = null
                                 eraseBaselineIds = emptySet()
                             }
+                            Tool.Text -> {
+                                val start = textAnchorBoard
+                                textAnchorBoard = null
+                                if (start != null) {
+                                    val end = state.viewport.toBoard(cursorPx.x / density, cursorPx.y / density)
+                                    // 起点终点几乎重合才算一次点击；拖出去视为改主意，不弹面板。
+                                    if (start.distanceTo(end) <= MIN_SHAPE_SIZE) {
+                                        state.beginTextPlacement(start)
+                                    }
+                                }
+                            }
                             Tool.Pan, null -> Unit
                         }
                         dragCursorBoard.value = null
@@ -198,6 +221,9 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                         state.livePoints = emptyList()
                         state.liveShapeStart = null
                         state.liveShapeEnd = null
+                        // 文字工具从不在拖拽途中改 doc（只记一个局部锚点候选），取消没有数据要抢救，
+                        // 直接清掉候选，不留任何痕迹——与 Pen/Shape 同理，跟橡皮的情况不同。
+                        textAnchorBoard = null
                         dragCursorBoard.value = null
                         dragCursorTool.value = null
                         // 笔/形状在提交前从不改动 doc，取消时丢弃 live 缓冲即可，没有数据要抢救。
@@ -257,6 +283,9 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                             value.dragAmount.x / density,
                             value.dragAmount.y / density,
                         )
+                        // 文字工具不参与拖拽绘制：这里什么都不做，onDragEnd 用共享的 cursorPx
+                        // 累计值（在这个 when 之前已经更新过）判断这次拖拽算不算一次点击。
+                        Tool.Text -> Unit
                         null -> Unit
                     }
                 }
@@ -296,6 +325,7 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                 )
                 Tool.Shape -> Unit
                 Tool.Pan -> Unit
+                Tool.Text -> Unit
                 null -> Unit
             }
         }

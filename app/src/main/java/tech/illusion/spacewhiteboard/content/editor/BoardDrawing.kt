@@ -13,6 +13,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke as StrokeStyle
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
@@ -158,33 +159,44 @@ fun DrawScope.drawBoard(
 private val TEXT_MEASURE_DENSITY = Density(density = 1f, fontScale = 1f)
 
 /**
- * 文字绘制分支（Task 3）。
+ * 屏幕渲染（[drawTextItem]）与创建时测量（`TextInputSheet.commitText`，Task 4）共用的唯一
+ * 测量入口——这是保证两者"用一模一样的输入喂给一模一样的纯函数"的**唯一**方式。
  *
- * 与 [TextItem.bounds] 的关系（Task 4 会用 `TextMeasurer` 量出 `hBoard`，这里必须先说清楚
- * 双方的耦合点）：只要 Task 4 用相同的输入——`text = item.text`、
- * `style = TextStyle(fontSize = item.sizeBoard.sp)`（不设 color，颜色不影响布局）、
- * `constraints = Constraints(maxWidth = item.wBoard.roundToInt().coerceAtLeast(1))`、
- * `density = TEXT_MEASURE_DENSITY`（`density=1f, fontScale=1f`）——调同一个
- * `TextMeasurer.measure(...)`，`layoutResult.size.height` 数值上就等于这里实际画出来的
- * 高度：这不是"两次独立测量凑巧相等"，而是同一组输入喂给同一个纯函数产生的同一个
- * `TextLayoutResult.size`，[drawText] 只是把它绘制出来，不引入任何额外的行距/padding/
- * baseline 偏移。
+ * Task 3 最初的写法是在两处分别手写 `TextStyle(fontSize = sizeBoard.sp)` /
+ * `Constraints(maxWidth = wBoard.roundToInt().coerceAtLeast(1))` / `density = TEXT_MEASURE_DENSITY`
+ * 这三个参数，靠"写的时候对照注释抄一遍"来保证一致——这正是本项目反复踩到的那类 bug 的
+ * 形状：两处各自维护同一份不变式，迟早会有一处改了另一处没跟上（参见 `canvas.paper` 圆角
+ * 那次教训）。抽成这一个函数后，"输入相同"由函数签名保证，不再依赖两处开发者的自律。
  *
- * 唯一的风险点是 `wBoard.roundToInt()` 这一步的四舍五入：`Constraints` 吃 `Int` px，
+ * 不传 `color`：颜色不影响布局测量，也不该影响——[drawTextItem] 在拿到这个纯几何的
+ * `TextLayoutResult` 之后，用 `drawText(layout, color = ...)` 的显式 `color` 参数覆盖着色，
+ * 创建时的测量（`TextInputSheet`）根本不关心颜色，只要 `layout.size.height` 这个几何量。
+ *
+ * 唯一仍未消除的风险点是 `wBoard.roundToInt()` 这一步的四舍五入：`Constraints` 吃 `Int` px，
  * `wBoard` 是 `Float` board units，四舍五入误差在极端情况下（换行宽度刚好卡在某个词的
- * 临界宽度上）可能让"要不要在这个词处换行"的判定与"如果 `maxWidth` 是精确 Float `wBoard`"
- * 时不同，从而改变行数、进而改变高度。只要 Task 4 用一模一样的 `roundToInt()` 换算，这个
- * 误差会精确复现在存下的 `hBoard` 里，不会造成渲染与存储之间的偏差——它只是"换一种取整
- * 方式重新测一次会不会得到不同结果"的理论风险，这里没有进一步验证。
+ * 临界宽度上）可能让"要不要在这个词处换行"的判定发生变化、从而改变行数与高度——但这个风险
+ * 现在也只存在于一处（这个函数内部），两个调用方永远读到同一次 `roundToInt()` 的结果，
+ * 不会出现"渲染量出来的换行"与"创建时存进 `hBoard` 的换行"互相打架的情况。
+ */
+internal fun measureTextLayout(
+    text: String,
+    sizeBoard: Float,
+    wBoard: Float,
+    measurer: TextMeasurer,
+): TextLayoutResult = measurer.measure(
+    text = text,
+    style = TextStyle(fontSize = sizeBoard.sp),
+    constraints = Constraints(maxWidth = wBoard.roundToInt().coerceAtLeast(1)),
+    density = TEXT_MEASURE_DENSITY,
+)
+
+/**
+ * 文字绘制分支（Task 3；Task 4 起测量逻辑收进 [measureTextLayout]，这里只是调用方之一）。
+ * 颜色在测量之后才通过 `drawText` 的 `color` 参数施加，不参与布局——见 [measureTextLayout] 的说明。
  */
 private fun DrawScope.drawTextItem(item: TextItem, textMeasurer: TextMeasurer) {
-    val layout = textMeasurer.measure(
-        text = item.text,
-        style = TextStyle(color = Color(item.colorArgb), fontSize = item.sizeBoard.sp),
-        constraints = Constraints(maxWidth = item.wBoard.roundToInt().coerceAtLeast(1)),
-        density = TEXT_MEASURE_DENSITY,
-    )
-    drawText(layout, topLeft = Offset(item.anchor.x, item.anchor.y))
+    val layout = measureTextLayout(item.text, item.sizeBoard, item.wBoard, textMeasurer)
+    drawText(layout, color = Color(item.colorArgb), topLeft = Offset(item.anchor.x, item.anchor.y))
 }
 
 /**

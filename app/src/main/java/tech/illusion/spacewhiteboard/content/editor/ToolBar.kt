@@ -182,7 +182,10 @@ fun ToolBar(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(GROUP_GAP),
     ) {
-        // ── 工具四选一（互斥）：2×2 网格 ────────────────────────────────────────────
+        // ── 工具五选一（互斥）：2×2 网格 + 第三行单个「文字」──────────────────────────
+        // 1a 契约只定死了四选一的 2×2 网格（文字属于 1b，契约 §5 明确排除）。这里延续同一套
+        // 网格语言（48×48dp、圆角 12dp、格间距 6dp）新增第三行，而不是把 2×2 挤成不规则布局——
+        // 第三行只有一个按钮时不需要额外的 Arrangement 技巧，Column 的整体居中已经处理好对齐。
         Column(verticalArrangement = Arrangement.spacedBy(TOOL_GAP)) {
             Row(horizontalArrangement = Arrangement.spacedBy(TOOL_GAP)) {
                 ToolToggle(state, Tool.Pen, "画笔")
@@ -191,6 +194,9 @@ fun ToolBar(
             Row(horizontalArrangement = Arrangement.spacedBy(TOOL_GAP)) {
                 ToolToggle(state, Tool.Eraser, "橡皮")
                 ToolToggle(state, Tool.Pan, "移动")
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(TOOL_GAP)) {
+                ToolToggle(state, Tool.Text, "文字")
             }
         }
 
@@ -622,8 +628,12 @@ internal fun ClearConfirmOverlay(onCancel: () -> Unit, onConfirm: () -> Unit) {
  * 拿到事件，所以对话框上的「取消」「清空」照常可点。
  *
  * 这不是死代码，编译、单测和静态截图都发现不了它缺失 —— 删之前先想清楚。
+ *
+ * `internal` 而不是 `private`：Kotlin 顶层 `private` 是文件私有，`TextInputSheet.kt`
+ * 的输入面板遮罩需要同一份"消费掉全部指针事件"的逻辑（同样的穿透风险，同样的教训），
+ * 两处各写一份等于把这条教训抄两遍、迟早走样，所以放宽到模块内共享，而不是复制粘贴。
  */
-private fun Modifier.consumeAllPointerEvents(): Modifier = pointerInput(Unit) {
+internal fun Modifier.consumeAllPointerEvents(): Modifier = pointerInput(Unit) {
     awaitPointerEventScope {
         while (true) {
             awaitPointerEvent().changes.forEach { it.consume() }

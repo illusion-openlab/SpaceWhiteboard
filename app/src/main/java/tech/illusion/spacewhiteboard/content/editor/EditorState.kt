@@ -5,7 +5,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import tech.illusion.spacewhiteboard.board.*
 
-enum class Tool { Pen, Shape, Eraser, Pan }
+enum class Tool { Pen, Shape, Eraser, Pan, Text }
 
 /**
  * 一次手势按下时锁存的工具与样式。
@@ -67,6 +67,28 @@ class EditorState(initialDoc: BoardDoc, initialNextId: Long) {
     var livePoints by mutableStateOf<List<Pt>>(emptyList())
     var liveShapeStart by mutableStateOf<Pt?>(null)
     var liveShapeEnd by mutableStateOf<Pt?>(null)
+
+    /**
+     * 文字工具已点选、但尚未确认输入的锚点（画布坐标）。非 null 即表示输入面板应当显示。
+     * 必须是 snapshot state：`BoardEditor` 靠读它触发 `TextInputSheet` 的重组，普通 var 只在
+     * 组合阶段读不到之后的写入，面板会永远不出现——与本类其余字段同一条理由（见类注释）。
+     */
+    var pendingTextAnchor by mutableStateOf<Pt?>(null)
+
+    /** 输入面板里的当前文本。面板关闭（提交或取消）时清空。 */
+    var pendingText by mutableStateOf("")
+
+    /** 文字工具点击定位后调用：记下锚点、清空输入框，驱动 `TextInputSheet` 出现。 */
+    fun beginTextPlacement(anchor: Pt) {
+        pendingTextAnchor = anchor
+        pendingText = ""
+    }
+
+    /** 取消文字输入：不留锚点、不留文本、不压入任何 Op —— 取消必须什么痕迹都不留。 */
+    fun cancelTextPlacement() {
+        pendingTextAnchor = null
+        pendingText = ""
+    }
 
     // 撤销栈本身不是 snapshot state，所以把它的两个可用性标志镜像成 state
     var canUndo by mutableStateOf(false); private set
