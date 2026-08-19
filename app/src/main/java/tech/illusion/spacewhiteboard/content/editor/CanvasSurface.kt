@@ -27,17 +27,24 @@ private const val MIN_SHAPE_SIZE = 4f
 /** 橡皮命中半径，board units。 */
 private const val ERASER_RADIUS = 12f
 
+/** `canvas.paper` 圆角，屏幕空间固定 dp（契约 §2.2）。不随 viewport.scale 缩放，见 [drawPaper]。 */
+private const val PAPER_RADIUS_DP = 6f
+
 @Composable
 fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val density = LocalDensity.current.density
+    val scheme = PicoTheme.colorScheme
     val pathCache = remember { mutableMapOf<ItemId, Path>() }
 
     Canvas(
         modifier = modifier
-            // 纸面色走主题角色。本应用把 fillTertiary 定义成浅色暖白纸面（契约 §8），
-            // 与它在其它项目里"深色面上的半透明浅底"的常见用法相反 —— 别当成写错了改回去。
-            .background(PicoTheme.colorScheme.fillTertiary)
+            // canvas.viewport 底色 = 根背景（fillSecondary），纸面之外露出这层留白，
+            // 才能在截图里核对到「纸面之外是根底色」（契约 §6 通用检查第 4 条）。
+            // 纸面本身（浅色暖白 fillTertiary，契约 §8）现在由 drawPaper 画成一个跟着
+            // viewport 移动/缩放的有界矩形，不再是整个 Canvas 的背景——否则平移和缩放
+            // 就没有任何可见边界，用户判断不出自己动了多少。
+            .background(scheme.fillSecondary)
             // 手势回调里原先每个字段读取都是 state.<field>，在调用时求值 ——
             // 但这意味着工具/颜色/宽度在拖拽进行中被切换时，onDragStart 与 onDragEnd/onDrag
             // 可能读到不同的 state.tool，导致 start 按 Pen 建立 livePoints、end 却按 Shape 分派，
@@ -144,11 +151,21 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                         }
                         Tool.Shape -> if (state.liveShapeStart != null) state.liveShapeEnd = p
                         Tool.Eraser -> eraseAt(state, p, erasedThisDrag)
-                        Tool.Pan, null -> Unit
+                        // 平移是纯视口变化：不提交、不入撤销栈，视口本就不是文档的一部分。
+                        // 用 value.dragAmount（本次增量，屏幕像素）而不是 cursorPx（累计绝对值），
+                        // panBy 要的是这一帧的位移量，不是从手势起点算起的位移总量。
+                        // Viewport 全程工作在 dp 空间，这里必须先除以 density 再传进去。
+                        Tool.Pan -> state.viewport = state.viewport.panBy(
+                            value.dragAmount.x / density,
+                            value.dragAmount.y / density,
+                        )
+                        null -> Unit
                     }
                 }
             },
     ) {
+        // canvas.paper：先画纸面矩形，再叠已提交内容与实时预览——纸面是底，墨迹在纸上。
+        drawPaper(state.viewport, density, scheme.fillTertiary, PAPER_RADIUS_DP)
         // 阈值式清理被擦掉对象留下的失效 Path 缓存条目：只在缓存明显超量时才重建一次存活 key 集合，
         // 避免在没有擦除发生的常态下每帧都做一次全量 Set 构建。
         if (pathCache.size > state.doc.items.size * 2) {

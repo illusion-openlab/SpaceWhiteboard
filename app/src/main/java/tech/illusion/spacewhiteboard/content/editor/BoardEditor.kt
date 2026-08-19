@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -63,6 +64,20 @@ fun BoardEditor(
     var confirmingClear by rememberSaveable { mutableStateOf(false) }
     /** `canvas.viewport` 的实测尺寸（px）。缩放要以视口中心为锚点，必须知道它有多大。 */
     var canvasSizePx by remember { mutableStateOf(IntSize.Zero) }
+
+    // 首次布局自动 fit：canvasSizePx 从 0 变成一个真实尺寸时执行一次 Viewport.fit。
+    // 判据用「viewport 仍是默认值 Viewport()」而不是一个 hasFitted 布尔量——
+    // 这样窗口第一次量出真实尺寸才会 fit；用户手动平移/缩放过一次之后，viewport 就再也不等于
+    // 默认值了（fit 出来的 offset/scale 几乎不可能正好落回 (0,0,1.0)），后续 canvasSizePx
+    // 因窗口尺寸变化而再次触发这个 effect 时也不会误把「用户选的视口」当成「还没 fit 过」而复位。
+    LaunchedEffect(canvasSizePx) {
+        if (canvasSizePx != IntSize.Zero && state.viewport == Viewport()) {
+            state.viewport = Viewport.fit(
+                viewW = canvasSizePx.width / density,
+                viewH = canvasSizePx.height / density,
+            )
+        }
+    }
 
     // Viewport 的 offset 与 CanvasSurface 里的换算一致，都是 dp（输入侧先除过 density）。
     fun zoomBy(factor: Float) {

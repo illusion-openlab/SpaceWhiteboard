@@ -1,5 +1,6 @@
 package tech.illusion.spacewhiteboard.content.editor
 
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -18,6 +19,29 @@ import tech.illusion.spacewhiteboard.board.*
  * pathCache 以 ItemId 为键缓存 board units 空间的 Path。
  * 每帧重建数百个 Path 才是真正会掉帧的地方，drawPath 本身不是瓶颈。
  */
+
+/**
+ * `canvas.paper`：把 2400×1600 的逻辑画布画成一个有边界的圆角矩形，四周露出根/视口背景，
+ * 让平移与缩放有一个看得见的参照物（契约 §2.2 `canvas.paper`；§6 通用检查第 4 条「纸面之外是根底色」）。
+ * 只在屏幕渲染路径调用——它是 chrome，不是文档内容，PNG 导出不应该把它烤进图里，
+ * 所以没有并进 [drawBoard]。
+ *
+ * 圆角固定 6dp（屏幕空间，不随 `viewport.scale` 缩放）：纸面的角是 UI 卡片语言，
+ * 不是画布内容的一部分，缩放画布不应该让边角跟着变圆或变尖。
+ */
+fun DrawScope.drawPaper(viewport: Viewport, density: Float, color: Color, cornerRadiusDp: Float) {
+    val leftPx = viewport.toScreenX(0f) * density
+    val topPx = viewport.toScreenY(0f) * density
+    val widthPx = Viewport.CANVAS_W * viewport.scale * density
+    val heightPx = Viewport.CANVAS_H * viewport.scale * density
+    drawRoundRect(
+        color = color,
+        topLeft = Offset(leftPx, topPx),
+        size = Size(widthPx, heightPx),
+        cornerRadius = CornerRadius(cornerRadiusDp * density),
+    )
+}
+
 fun DrawScope.drawBoard(
     doc: BoardDoc,
     viewport: Viewport,
