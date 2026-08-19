@@ -76,6 +76,15 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
     // 悄悄依赖 textMeasurer 自带的默认 resolver，两个调用方（这里与 TextInputSheet）都显式
     // 传同一类来源，跟 layoutDirection 被钉死成 Ltr 是同一次修复的两半。
     val fontFamilyResolver = LocalFontFamilyResolver.current
+    // 文字插入光标（1b-2 真机反馈修复项）要标的高度是"一行文字真实有多高"，不是猜的字号倍数——
+    // 用跟 TextInputSheet.kt 的 containAnchor 完全相同的一次测量（同一批常量 TEXT_SIZE_BOARD/
+    // MIN_WRAP_BOARD、同一个 measureTextLayout），两处必须读到同一个数，否则光标标出的高度会
+    // 跟输入框实际收紧锚点时用的高度不一致。这个测量结果只依赖 textMeasurer/fontFamilyResolver
+    // （不依赖任何锚点位置），用 remember 避免每帧都重新量一次。
+    val oneLineBoard = remember(textMeasurer, fontFamilyResolver) {
+        measureTextLayout("字", TEXT_SIZE_BOARD, MIN_WRAP_BOARD, textMeasurer, fontFamilyResolver)
+            .size.height.toFloat()
+    }
     // 拖拽游标位置：Pen 或 Eraser 拖拽进行中，"系统认为笔尖/擦除中心在哪"（board units）；
     // 没有 Pen/Eraser 拖拽时为 null、不画。用 mutableStateOf 而不是手势协程里的局部变量，
     // 原因和 state.livePoints 一样——下面 Canvas 的 draw lambda 要在另一处读它来画游标，
@@ -393,6 +402,15 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                 Tool.Text -> Unit
                 null -> Unit
             }
+        }
+        // 文字插入光标（1b-2 真机反馈修复项）：面板打开期间（state.pendingTextAnchor 非空）
+        // 在锚点处画一条竖线，标出"文字会从哪里开始长"——用户反馈画板上没有任何 app 绘制的
+        // 标记，能看到的只有系统空间光斑（标的是"点在哪"，不是"文字从哪起笔"）。画在
+        // dragCursorBoard 的游标之后（两者互斥：dragCursorBoard 只在 Pen/Eraser 拖拽中非空，
+        // pendingTextAnchor 只在文字工具点击定位后非空），同样最后画、叠在已提交内容和实时
+        // 预览之上。见 BoardDrawing.kt 的 drawTextCaret。
+        state.pendingTextAnchor?.let { anchor ->
+            drawTextCaret(anchor, oneLineBoard, scheme.interaction, state.viewport, density)
         }
     }
 }

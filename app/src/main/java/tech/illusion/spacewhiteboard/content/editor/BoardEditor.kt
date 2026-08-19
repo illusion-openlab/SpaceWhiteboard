@@ -26,11 +26,20 @@ import androidx.compose.ui.unit.dp
 import com.pico.spatial.ui.design.PicoTheme
 import tech.illusion.spacewhiteboard.board.Viewport
 
-/** 编辑器根内边距（契约 §1 布局骨架：根 Box → 内边距 12dp）。 */
-private val EDITOR_PADDING = 12.dp
+/**
+ * 编辑器根内边距（契约 §1 布局骨架：根 Box → 内边距 12dp）。
+ *
+ * 从 `private` 改成 `internal`（1b-2 真机反馈修复项）：`TextInputSheet.kt` 把输入卡面贴邻锚点
+ * 摆放时，需要把 `canvas.viewport` 自身左上角的屏幕坐标换算成这个编辑器根 `Box` 左上角的坐标，
+ * 这个换算必须用跟 [BoardEditor] 布局里实际使用的同一个内边距值，不能另起一个字面量。
+ */
+internal val EDITOR_PADDING = 12.dp
 
-/** 工具栏与画布之间的间隙。契约 §1：两者之间没有分隔线，靠 12dp 间隙 + 明度落差分开。 */
-private val RAIL_CANVAS_GAP = 12.dp
+/**
+ * 工具栏与画布之间的间隙。契约 §1：两者之间没有分隔线，靠 12dp 间隙 + 明度落差分开。
+ * 同 [EDITOR_PADDING] 一样改成 `internal`：贴邻放置的坐标换算也要用这个真实间隙值。
+ */
+internal val RAIL_CANVAS_GAP = 12.dp
 
 /** `canvas.viewport` 圆角。 */
 private val CANVAS_RADIUS = 10.dp

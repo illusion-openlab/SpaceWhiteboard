@@ -12,18 +12,22 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFontFamilyResolver
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
@@ -43,8 +47,12 @@ import kotlin.math.min
  * 文字工具默认字号，**画布单位**（与 `Stroke.widthDp` 同一类字面量，不是 `PicoTheme.typography`
  * 的某个排版角色——画布内容的字号要随 `viewport.scale` 一起缩放，主题排版角色是给 UI chrome
  * 文字用的、天生跟画布缩放无关，两者不是同一个维度，不能混用）。
+ *
+ * 从 `private` 改成 `internal`（1b-2 真机反馈修复项）：`CanvasSurface.kt` 的文字插入光标
+ * （`drawTextCaret`）需要跟这里量出同一个 [oneLineBoard]，唯一办法是喂同一个字号常量给同一个
+ * [measureTextLayout]——两处各自定义一份 48f 字面量，迟早会有一处改了另一处没跟上。
  */
-private const val TEXT_SIZE_BOARD = 48f
+internal const val TEXT_SIZE_BOARD = 48f
 
 /**
  * 换行宽度的下限，画布单位（1b-2 复审修复项）。[wrapBoardFor] 优先取"画布宽度三分之一"与
@@ -55,7 +63,7 @@ private const val TEXT_SIZE_BOARD = 48f
  * 放置的文字，右侧一截仍会被 `clipToPaper` 裁掉——这是已知取舍，不是这一项要根治的问题
  * （根治需要选择工具把文字整体挪走，1b-4 才有）。
  */
-private const val MIN_WRAP_BOARD = 160f
+internal const val MIN_WRAP_BOARD = 160f
 
 /** 换行宽度：取「画布宽度三分之一」与「锚点到纸面右边界的剩余空间」中较小的一个，再夹一个
  *  下限（1b-2 复审修复项，见 [MIN_WRAP_BOARD]）。旧版是不看锚点位置的固定常量
@@ -97,6 +105,12 @@ private val SHEET_BUTTON_HPAD = 24.dp
 private val SHEET_BUTTON_GAP = 12.dp
 
 /**
+ * 卡面与锚点/光标（[drawTextCaret]）之间必须留出的可见间隙（1b-2 真机反馈修复项）——贴邻
+ * 不等于零边距，题面明确要求"留一个看得见的缝隙，不是零边距贴合"。
+ */
+private val SHEET_ANCHOR_GAP = 16.dp
+
+/**
  * `clearDialog.scrim` 同一个不透明度（契约 §8：`fillSecondary.copy(alpha = 0.72f)`）——
  * 这不是另起一个数，是复用本应用已经确立的"模态遮罩"视觉语言，两个模态面板压出的观感一致。
  */
@@ -129,10 +143,12 @@ private const val FOCUS_RETRY_ATTEMPTS = 3
  * `value`），这里不做任何定位相关的事——但**弹出这件事本身需要先有焦点**（1b-2 复审修复项，
  * 见下面 `LaunchedEffect` 的说明），面板出现不等于系统已经把输入焦点给了 `TextArea`。
  *
- * **卡面避开锚点，而不是靠边（1b-4 用户决策）**：锚点在画布上半区就把卡面放到下半区，反之
- * 放到上半区——不是把卡面移到某个固定角落。理由是书写文字最常见的用途是给画布上已有的东西
- * 加标注，构图时需要同时看见锚点位置和它周围的内容，靠边会让锚点附近整块被卡面挡住、什么都
- * 看不见；避开锚点所在的那一半，锚点周围至少留出半块画布可见。
+ * **卡面贴邻锚点，不再对半选边（1b-2 真机反馈修复项，取代 886c4b7 的上/下半区二分）**：
+ * 上一版"锚点在上半区就把卡面丢到下半区、反之丢到上半区"在真机上验出的问题是卡面离锚点太远——
+ * 半区二分保证的只是"卡面不挡住锚点"，没有保证卡面离锚点近。用户在真机上试完后选定的方案是
+ * 贴邻放置：卡面出现在锚点旁边，水平方向偏到剩余空间更宽的那一侧、垂直方向贴着锚点，但绝不
+ * 覆盖锚点本身（含 [drawTextCaret] 画的那条光标线）。见下面 `BoxWithConstraints` 里的
+ * 水平/垂直偏移量计算。
  */
 @Composable
 fun TextInputSheet(state: EditorState, modifier: Modifier = Modifier) {
@@ -201,6 +217,13 @@ fun TextInputSheet(state: EditorState, modifier: Modifier = Modifier) {
     val safeAnchor = containAnchor(anchor, oneLineBoard)
     val wrapBoard = wrapBoardFor(safeAnchor.x)
 
+    // 卡面实测高度（px，1b-2 真机反馈修复项）：贴邻放置时垂直方向要知道卡面到底多高才能判断
+    // 会不会被窗口底边裁掉，但卡面高度不是固定值——`TextArea` 没有 `heightIn` 的上限，用户
+    // 打字多了会长高。用 `Modifier.onGloballyPositioned` 在 Column 布局完成后把真实高度写回来，
+    // 比在这里猜一个"卡面大概多高"的常量更站得住，见下面用到它的说明。用 remember 而不是每次
+    // 重组重新建：面板存活期间要持续累积同一份最新测量结果，不能被 `pendingText` 触发的重组重置。
+    val sheetHeightPx = remember { mutableStateOf(0) }
+
     fun commitText(raw: String) {
         val text = raw.trim()
         // 空白文本不创建对象：一个看不见但存在的 TextItem 会占据撤销栈、出现在存档里，
@@ -236,17 +259,12 @@ fun TextInputSheet(state: EditorState, modifier: Modifier = Modifier) {
         state.cancelTextPlacement()
     }
 
-    // `BoxWithConstraints` 而不是 `Box`：卡面该出现在上半区还是下半区（1b-2 复审修复项 D）
-    // 需要知道锚点此刻在**屏幕**上的位置，不能只看它在画布逻辑坐标（`[0,CANVAS_H]`）里的位置——
-    // 上一版直接拿 `anchor.y < CANVAS_H / 2f` 判断，锚点坐标是文档坐标、这个面板卡面却是在屏幕
-    // 空间摆放，视口一旦平移或缩放过，同一个锚点在文档坐标系里落在哪一半和它此刻实际显示在屏幕
-    // 哪一半就会不一致——用户点在自己肉眼看见的下半屏，却因为文档坐标算出来是"上半区"而把卡面
-    // 摆到下半屏，正好糊住刚点的位置，违反"卡面避开锚点"这条要求本身。修法是换算成屏幕坐标再判断：
-    // `state.viewport.toScreenY(...)` 用的是与手势读取（`CanvasSurface` 的 `toBoard`）、绘制
-    // （`BoardDrawing.kt` 的 `withTransform`）同一份 `offset`/`scale`；`maxHeight` 来自这个
-    // `BoxWithConstraints` 自身——它和 `BoardEditor.kt` 里的根 Box 一样铺满整个编辑器窗口，取它的
-    // `maxHeight` 近似整个窗口的可见高度（与 `canvas.viewport` 的实际高度只差左侧 12dp 内边距，
-    // 数量级远小于这个二分判断关心的"上半/下半"，不影响这个判断的正确性）。
+    // `BoxWithConstraints` 而不是 `Box`：卡面贴邻锚点摆放需要知道锚点此刻在**屏幕**上的位置，
+    // 不能只看它在画布逻辑坐标（`[0,CANVAS_H]`）里的位置——视口一旦平移或缩放过，同一个锚点在
+    // 文档坐标系里的数值和它此刻实际显示在屏幕哪个位置就会不一致。修法是换算成屏幕坐标：
+    // `state.viewport.toScreenX/Y(...)` 用的是与手势读取（`CanvasSurface` 的 `toBoard`）、绘制
+    // （`BoardDrawing.kt` 的 `withTransform`）同一份 `offset`/`scale`，结果是 dp（`Viewport`
+    // 本身是 dp 空间），跟这个 `BoxWithConstraints` 的 `maxWidth`/`maxHeight` 同一个单位。
     BoxWithConstraints(
         modifier = modifier
             .fillMaxSize()
@@ -271,15 +289,51 @@ fun TextInputSheet(state: EditorState, modifier: Modifier = Modifier) {
             }
         }
 
-        // 卡面避开锚点所在的半区（见类注释「卡面避开锚点」），现在按锚点的屏幕 y 坐标判断，
-        // 不再按画布逻辑坐标判断（见上面 BoxWithConstraints 的说明）。
-        val anchorScreenY = state.viewport.toScreenY(safeAnchor.y)
-        val sheetAlignment =
-            if (anchorScreenY < maxHeight.value / 2f) Alignment.BottomCenter else Alignment.TopCenter
+        // 锚点相对这个 `BoxWithConstraints`（铺满整个编辑器窗口，见上面的说明）左上角的屏幕
+        // 坐标，dp。`viewport.toScreenX/Y` 给出的坐标是相对 `canvas.viewport` 自身左上角的——
+        // 二分对齐（886c4b7）只关心锚点落在上半屏还是下半屏，`canvas.viewport` 与编辑器窗口
+        // 原点之间那点 `EDITOR_PADDING`/`TOOLBAR_WIDTH`/`RAIL_CANVAS_GAP` 偏移，量级远小于
+        // 半屏，可以忽略；贴邻放置要把卡面钉在锚点旁边几十 dp 的地方，同一个偏移量已经跟
+        // [SHEET_ANCHOR_GAP]、[SHEET_WIDTH] 同一个量级，必须显式加回来——否则算出来的贴邻
+        // 位置会系统性地偏左偏上，卡面看起来"贴的不是锚点"。`EDITOR_PADDING`/`RAIL_CANVAS_GAP`
+        // 现在从 `BoardEditor.kt` 的 `private` 改成 `internal`，跟 `TOOLBAR_WIDTH`（`ToolBar.kt`，
+        // 本来就是 `internal`/公开）一样单一定义、两处共读。
+        val anchorScreenX = EDITOR_PADDING.value + TOOLBAR_WIDTH.value + RAIL_CANVAS_GAP.value +
+            state.viewport.toScreenX(safeAnchor.x)
+        val anchorScreenY = EDITOR_PADDING.value + state.viewport.toScreenY(safeAnchor.y)
+
+        // 水平：偏到剩余空间更宽的那一侧——锚点越靠右，右侧剩余空间越少，越应该翻到左侧
+        // （题面里"贴近右边界就翻到锚点左侧"这条要求，本质就是"选剩余空间更大的一侧"，不需要
+        // 单独判断"是否已经贴近边界"）。留出 [SHEET_ANCHOR_GAP] 的可见间隙，保证卡面不会跟
+        // 锚点/光标线（[drawTextCaret]）零边距贴在一起。最后再夹一次到 `[0, maxWidth - SHEET_WIDTH]`
+        // 兜底：只有窗口本身比 `SHEET_WIDTH + SHEET_ANCHOR_GAP` 还窄这种退化场景才会真的触发，
+        // 代价是那种极端场景下贴邻间隙可能被压缩，不是这一项要解决的问题。
+        val roomRight = maxWidth.value - anchorScreenX
+        val roomLeft = anchorScreenX
+        val preferredLeft = if (roomRight >= roomLeft) {
+            anchorScreenX + SHEET_ANCHOR_GAP.value
+        } else {
+            anchorScreenX - SHEET_ANCHOR_GAP.value - SHEET_WIDTH.value
+        }
+        val sheetLeft = preferredLeft.coerceIn(0f, (maxWidth.value - SHEET_WIDTH.value).coerceAtLeast(0f))
+
+        // 垂直：贴着锚点的屏幕 y 坐标放（卡面顶部与锚点齐平），除非会被底边裁掉——那种情况下
+        // 往上收，让卡面整体留在窗口内（题面"贴近底边就上移"）。卡面高度不是固定值（`TextArea`
+        // 没有 `heightIn` 的上限，用户打字多了会长高），这里用 [sheetHeightPx] 记录上一帧
+        // `onGloballyPositioned` 实测的真实高度来夹这个上界——比硬编码一个"卡面大概多高"的猜测
+        // 常量更站得住（跟 [oneLineBoard] 用测量代替猜测是同一条理由）。首帧 `sheetHeightPx`
+        // 还是 0，夹出来的上界是 `maxHeight`，第一帧可能贴着底边越界一点，下一帧测到真实高度后
+        // 自动收紧——不是无界的抖动，一次测量就收敛，可接受的短暂近似。
+        val sheetHeightDp = with(LocalDensity.current) { sheetHeightPx.value.toDp() }
+        val sheetTop = anchorScreenY.coerceIn(
+            0f,
+            (maxHeight.value - sheetHeightDp.value).coerceAtLeast(0f),
+        )
 
         Column(
             modifier = Modifier
-                .align(sheetAlignment)
+                .offset(x = sheetLeft.dp, y = sheetTop.dp)
+                .onGloballyPositioned { sheetHeightPx.value = it.size.height }
                 .width(SHEET_WIDTH)
                 .clip(RoundedCornerShape(SHEET_RADIUS))
                 .background(scheme.fillSecondary)

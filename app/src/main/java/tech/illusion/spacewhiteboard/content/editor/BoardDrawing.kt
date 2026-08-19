@@ -392,6 +392,56 @@ fun DrawScope.drawEraserCursor(
     }
 }
 
+/**
+ * 文字插入光标的描边宽度，**屏幕空间常量** dp——与 [ERASER_CURSOR_RING_STROKE_DP] 同一条
+ * 换算理由（见其上方注释）：这里已经叠了 `scale(viewport.scale * density, ...)`，board-space
+ * 常量在这个坐标系下直接用会随 `viewport.scale` 变粗/变细，所以用法一致——除以
+ * `viewport.scale` 抵消坐标系自带的缩放，光标描边在屏幕上永远是这个 dp 值。
+ */
+private const val TEXT_CARET_STROKE_DP = 2f
+
+/**
+ * 文字插入光标（1b-2 真机反馈修复项）：`Tool.Text` 点画布定位之后，`state.pendingTextAnchor`
+ * 非空、输入面板尚未确认这段时间里，画布上此前没有任何 app 绘制的标记——用户反馈"不知道自己
+ * 绘制所在的位置"，能看到的只有 PICO 系统的空间光斑（reticle），那标的是"这次点在哪"，不是
+ * "文字会从哪个像素开始长"，两者在放置这一刻经常是同一个点，但语义并不相同，光斑也不会在
+ * 面板打开期间常驻提示。
+ *
+ * 画一条从 [anchor]（[TextItem.bounds] 的左上角）向下延伸 [lineHeightBoard] 的竖线：
+ * [anchor] 就是提交时真正写进 [TextItem.anchor] 的那个点，[lineHeightBoard] 必须来自调用方
+ * 用 [measureTextLayout] 量出的真实一行高度（`CanvasSurface.kt` 与 `TextInputSheet.kt` 的
+ * `containAnchor` 现在共用同一次测量，见调用点），不是这里随手猜的字号倍数——不然光标标出的
+ * 高度会跟输入框实际收紧锚点时用的高度不一致。
+ *
+ * 只在屏幕渲染路径调用，从不并入 [drawBoard]：跟 [drawPenCursor]/[drawEraserCursor] 同一条
+ * 理由，PNG 导出（`export.BoardRenderer`）只调 [drawBoard]，天然看不到这条光标线，不需要额外
+ * 开关把它排除在导出之外。颜色复用 [WhiteboardColorScheme] 的 `interaction` 角色——跟笔尖
+ * 游标同一个"这是应用的指针"语义，不是画布内容的颜色。描边宽度换算见 [TEXT_CARET_STROKE_DP]。
+ * 裁剪与其余游标一致：先 `withTransform` 再 [clipToPaper]。
+ */
+fun DrawScope.drawTextCaret(
+    anchor: Pt,
+    lineHeightBoard: Float,
+    color: Color,
+    viewport: Viewport,
+    density: Float,
+) {
+    withTransform({
+        translate(viewport.offsetX * density, viewport.offsetY * density)
+        scale(viewport.scale * density, viewport.scale * density, pivot = Offset.Zero)
+    }) {
+        clipToPaper(viewport) {
+            drawLine(
+                color = color,
+                start = Offset(anchor.x, anchor.y),
+                end = Offset(anchor.x, anchor.y + lineHeightBoard),
+                strokeWidth = TEXT_CARET_STROKE_DP / viewport.scale,
+                cap = StrokeCap.Round,
+            )
+        }
+    }
+}
+
 /** 二次贝塞尔中点法建路径，坐标全在 board units，因此与视口无关、可缓存。 */
 private fun buildStrokePath(points: List<Pt>): Path {
     val sp = StrokeSmoothing.smooth(points) ?: return Path()
