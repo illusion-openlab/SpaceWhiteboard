@@ -11,8 +11,19 @@ data class DecodeResult(val doc: BoardDoc, val skippedLines: Int)
  *  1. 笔迹是成千上万个浮点数，JSON 的体积与解析开销都不划算；
  *  2. org.json 在 JVM 单测里是 stub（调用直接抛异常），而本类恰恰最需要被单测覆盖；
  *  3. 纯字符串处理零依赖、可流式、损坏时易于人工排查。
+ *
+ * `t` 行（文本）格式：
+ * ```
+ * t <argb8位小写hex> <sizeBoard> <x>,<y> <wBoard> <hBoard> <base64(utf8 text)>
+ * ```
+ * 空文本的哨兵：base64 编码空字符串会产出空串，而 `decode` 按空格分词并过滤空 token，
+ * 于是空文本的 `t` 行会少一个 token、被当成畸形行跳过——用户打开文字输入面板直接确认
+ * 就能触发这条路径。为此，文本为空时第 7 个 token 写成单个 `-` 而不是 base64 输出。
+ * base64 字母表是 `A-Za-z0-9+/=`，永远不会产出裸 `-`，所以这个哨兵不会与真实编码冲突。
  */
 object BoardCodec {
+
+    private const val EMPTY_TEXT = "-"
 
     const val HEADER = "wbd1"
 
@@ -33,7 +44,15 @@ object BoardCodec {
                         .append(' ').append(item.b.x).append(',').append(item.b.y)
                         .append('\n')
                 }
-                is TextItem -> Unit // 真正的编码由 Task 2 补上；此刻无法创建 TextItem，占位不会丢失数据
+                is TextItem -> {
+                    append("t ").append(hex(item.colorArgb))
+                        .append(' ').append(item.sizeBoard)
+                        .append(' ').append(item.anchor.x).append(',').append(item.anchor.y)
+                        .append(' ').append(item.wBoard)
+                        .append(' ').append(item.hBoard)
+                        .append(' ').append(encodeText(item.text))
+                        .append('\n')
+                }
             }
         }
     }
@@ -81,7 +100,19 @@ object BoardCodec {
                 val kind = ShapeKind.valueOf(t[1])
                 ShapeItem(id, kind, unhex(t[2]), t[3].toFloat(), parsePt(t[4]), parsePt(t[5]))
             }
-            else -> null                                          // 未知前缀（1b 的 t / i）
+            "t" -> {
+                if (t.size != 7) return null
+                TextItem(
+                    id = id,
+                    text = decodeText(t[6]),
+                    colorArgb = unhex(t[1]),
+                    sizeBoard = t[2].toFloat(),
+                    anchor = parsePt(t[3]),
+                    wBoard = t[4].toFloat(),
+                    hBoard = t[5].toFloat(),
+                )
+            }
+            else -> null                                          // 未知前缀（1b 的 i）
         }
     }
 
@@ -90,6 +121,14 @@ object BoardCodec {
         require(c.size == 2)
         return Pt(c[0].toFloat(), c[1].toFloat())
     }
+
+    private fun encodeText(text: String): String =
+        if (text.isEmpty()) EMPTY_TEXT
+        else java.util.Base64.getEncoder().encodeToString(text.toByteArray(Charsets.UTF_8))
+
+    private fun decodeText(token: String): String =
+        if (token == EMPTY_TEXT) ""
+        else String(java.util.Base64.getDecoder().decode(token), Charsets.UTF_8)
 
     private fun hex(argb: Int): String = String.format("%08x", argb)
 
