@@ -102,7 +102,7 @@ fun mainApp(scope: SpatialAppScope) =
                                 // 渲染（Canvas 绘制）与 PNG 压缩都挪到 IO 线程：一张 2x 的
                                 // 大图，这两步合起来足以让主线程明显卡顿一下。
                                 val bitmap = withContext(Dispatchers.IO) {
-                                    BoardRenderer.render(state.doc, paperArgb = PAPER_ARGB)
+                                    BoardRenderer.render(state.doc, context = context, paperArgb = PAPER_ARGB)
                                 }
                                 if (bitmap == null) {
                                     // 空文档：不是失败，是没什么可导出的，不用 error 语气。

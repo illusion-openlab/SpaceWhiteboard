@@ -13,7 +13,14 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke as StrokeStyle
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.text.TextMeasurer
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.sp
 import tech.illusion.spacewhiteboard.board.*
+import kotlin.math.roundToInt
 
 /**
  * `canvas.paper` 圆角，屏幕空间固定 dp（契约 §2.2），不随 `viewport.scale` 缩放——见 [drawPaper]。
@@ -101,6 +108,7 @@ fun DrawScope.drawBoard(
     viewport: Viewport,
     density: Float,
     pathCache: MutableMap<ItemId, Path>,
+    textMeasurer: TextMeasurer,
 ) {
     withTransform({
         translate(viewport.offsetX * density, viewport.offsetY * density)
@@ -119,11 +127,64 @@ fun DrawScope.drawBoard(
                         }
                     }
                     is ShapeItem -> drawShape(item)
-                    is TextItem -> Unit // 真正的绘制由 Task 3 补上；此刻无法创建 TextItem，空分支不产生可感知状态
+                    is TextItem -> drawTextItem(item, textMeasurer)
                 }
             }
         }
     }
+}
+
+/**
+ * 文字度量用的固定密度：density=1f、fontScale=1f，与调用方的真实设备密度、系统字体缩放
+ * 无关。[drawBoard] 在进入这个分支之前已经叠了 `scale(viewport.scale * density, ...)`——
+ * 这个复合变换本身就会把这里画出来的每一个像素按 `density` 放大一次。如果
+ * `TextMeasurer.measure` 又拿设备真实密度把 `sizeBoard.sp` 换算成 px（sp→px 本身就是
+ * 再乘一次 density），就会变成"先乘一次密度、外层变换又乘一次"的双重缩放——正是这一步
+ * brief 里点名的那类 bug（同一份文档在不同 dpi 设备上量出的字号相差一个跟设备有关的倍数）。
+ * 用固定 [Density] 测量，`sizeBoard.sp` 换算出的 px 数值上就直接等于 [TextItem.sizeBoard]
+ * 本身，缩放完全交给外层 `withTransform` 一次性完成——这与 [Stroke.widthDp] 直接被当成
+ * board units 传给 [StrokeStyle]（同样只在外层变换里被放大一次，函数体内从不再乘
+ * density）是同一种处理方式，文字与墨迹在这条变换链上走的是同一套规则。
+ *
+ * `fontScale` 固定 1f、不读系统无障碍字体缩放设置：`canvas.paper` 上的文字是画布内容，
+ * 该跟着 `viewport.scale` 缩放，不该再叠加一层"这台设备/这个用户把系统字体调大了多少"——
+ * 否则同一份文档在不同用户的设备上，[TextItem.hBoard]（创建时测量存下的高度）与这里实际
+ * 画出来的高度会不一致，PNG 导出裁切的基准也会跟着漂移。
+ *
+ * 调用方传入的 [TextMeasurer] 无论是 `rememberTextMeasurer()`（读 `LocalDensity.current`
+ * 当默认密度）还是手动构造的实例，这里都不使用它自带的默认密度——每次调用都用这个常量
+ * 显式覆盖 `measure()` 的 `density` 参数，调用方的默认密度取值因此不影响这里的渲染结果。
+ */
+private val TEXT_MEASURE_DENSITY = Density(density = 1f, fontScale = 1f)
+
+/**
+ * 文字绘制分支（Task 3）。
+ *
+ * 与 [TextItem.bounds] 的关系（Task 4 会用 `TextMeasurer` 量出 `hBoard`，这里必须先说清楚
+ * 双方的耦合点）：只要 Task 4 用相同的输入——`text = item.text`、
+ * `style = TextStyle(fontSize = item.sizeBoard.sp)`（不设 color，颜色不影响布局）、
+ * `constraints = Constraints(maxWidth = item.wBoard.roundToInt().coerceAtLeast(1))`、
+ * `density = TEXT_MEASURE_DENSITY`（`density=1f, fontScale=1f`）——调同一个
+ * `TextMeasurer.measure(...)`，`layoutResult.size.height` 数值上就等于这里实际画出来的
+ * 高度：这不是"两次独立测量凑巧相等"，而是同一组输入喂给同一个纯函数产生的同一个
+ * `TextLayoutResult.size`，[drawText] 只是把它绘制出来，不引入任何额外的行距/padding/
+ * baseline 偏移。
+ *
+ * 唯一的风险点是 `wBoard.roundToInt()` 这一步的四舍五入：`Constraints` 吃 `Int` px，
+ * `wBoard` 是 `Float` board units，四舍五入误差在极端情况下（换行宽度刚好卡在某个词的
+ * 临界宽度上）可能让"要不要在这个词处换行"的判定与"如果 `maxWidth` 是精确 Float `wBoard`"
+ * 时不同，从而改变行数、进而改变高度。只要 Task 4 用一模一样的 `roundToInt()` 换算，这个
+ * 误差会精确复现在存下的 `hBoard` 里，不会造成渲染与存储之间的偏差——它只是"换一种取整
+ * 方式重新测一次会不会得到不同结果"的理论风险，这里没有进一步验证。
+ */
+private fun DrawScope.drawTextItem(item: TextItem, textMeasurer: TextMeasurer) {
+    val layout = textMeasurer.measure(
+        text = item.text,
+        style = TextStyle(color = Color(item.colorArgb), fontSize = item.sizeBoard.sp),
+        constraints = Constraints(maxWidth = item.wBoard.roundToInt().coerceAtLeast(1)),
+        density = TEXT_MEASURE_DENSITY,
+    )
+    drawText(layout, topLeft = Offset(item.anchor.x, item.anchor.y))
 }
 
 /**

@@ -12,6 +12,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.rememberTextMeasurer
 import com.pico.spatial.ui.design.PicoTheme
 import com.pico.spatial.ui.foundation.gesture.detectSpatialDragGesture
 import tech.illusion.spacewhiteboard.board.*
@@ -65,6 +66,10 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
     val density = LocalDensity.current.density
     val scheme = PicoTheme.colorScheme
     val pathCache = remember { mutableMapOf<ItemId, Path>() }
+    // 组合期创建一次，drawBoard 内部量文字时永远显式传 TEXT_MEASURE_DENSITY 覆盖它
+    // 自带的默认密度（来自 LocalDensity.current），所以这里的默认密度取值不影响渲染结果——
+    // 见 BoardDrawing.kt 里 TEXT_MEASURE_DENSITY 的说明。
+    val textMeasurer = rememberTextMeasurer()
     // 拖拽游标位置：Pen 或 Eraser 拖拽进行中，"系统认为笔尖/擦除中心在哪"（board units）；
     // 没有 Pen/Eraser 拖拽时为 null、不画。用 mutableStateOf 而不是手势协程里的局部变量，
     // 原因和 state.livePoints 一样——下面 Canvas 的 draw lambda 要在另一处读它来画游标，
@@ -265,7 +270,7 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
             val alive = state.doc.items.map { it.id }.toSet()
             pathCache.keys.retainAll(alive)
         }
-        drawBoard(state.doc, state.viewport, density, pathCache)
+        drawBoard(state.doc, state.viewport, density, pathCache, textMeasurer)
         // 预览一律读 live* 派生属性：手势进行中它们返回 onDragStart 锁存的那一份样式，
         // 与 onDragEnd 提交用的是同一个 ActiveStyle 实例。工具栏做出来之后这条很要紧 ——
         // 另一根手指完全可以在拖拽途中换颜色，那时读 state.colorArgb 会让预览和落笔不一致。
