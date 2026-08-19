@@ -39,8 +39,21 @@ private const val MIN_STEP_PX = 2.0f
 /** 起点终点距离小于此值视为误触，不生成形状。board units。 */
 private const val MIN_SHAPE_SIZE = 4f
 
-/** 橡皮命中半径，board units。 */
-private const val ERASER_RADIUS = 12f
+/**
+ * 橡皮命中半径，**屏幕像素空间**（不是 board units）——理由同 [MIN_STEP_PX] 顶部那段注释：
+ * "手指划过多宽一圈算擦到"是屏幕空间的概念，跟当前缩放倍数无关。旧版直接拿 12 当 board
+ * units 用，50% 缩放时屏幕热区只有 6dp、400% 时又变成 48dp，同一个手势在不同缩放下
+ * 擦除范围感觉完全不同。换算成画布单位见 [eraserRadiusBoard]。
+ *
+ * 取值须明显大于 MIN_STEP_PX 一节里实测的中位采样步长（6.06px），否则手指划过的路径上会
+ * 漏出没擦到的缝。**24px 已经在真机 PICO Swan 上完整试玩确认**：擦除确实生效，热区大小的
+ * 手感合适，不是一个还需要现场核对的起始猜测值（详见 `AGENTS.md`「已验证的 / 未验证的」）。
+ */
+private const val ERASER_RADIUS_PX = 24f
+
+/** 屏幕像素橡皮半径 → 画布单位半径：随缩放变化的是屏幕热区，不是画布几何距离。 */
+private fun eraserRadiusBoard(density: Float, viewport: Viewport): Float =
+    ERASER_RADIUS_PX / (density * viewport.scale)
 
 // `canvas.paper` 圆角常量（契约 §2.2，6dp，不随 viewport.scale 缩放）已经内收进
 // `BoardDrawing.kt` 的 `PAPER_CORNER_RADIUS_DP`——`drawPaper` 与 `clipToPaper` 现在读的是
@@ -52,9 +65,10 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
     val density = LocalDensity.current.density
     val scheme = PicoTheme.colorScheme
     val pathCache = remember { mutableMapOf<ItemId, Path>() }
-    // 笔尖游标：Pen 拖拽进行中，"系统认为落墨点在哪"（board units）；没有 Pen 拖拽时为
-    // null、不画。用 mutableStateOf 而不是手势协程里的局部变量，原因和 state.livePoints
-    // 一样——下面 Canvas 的 draw lambda 要在另一处读它来画游标，局部变量读不到。
+    // 拖拽游标位置：Pen 或 Eraser 拖拽进行中，"系统认为笔尖/擦除中心在哪"（board units）；
+    // 没有 Pen/Eraser 拖拽时为 null、不画。用 mutableStateOf 而不是手势协程里的局部变量，
+    // 原因和 state.livePoints 一样——下面 Canvas 的 draw lambda 要在另一处读它来画游标，
+    // 局部变量读不到。
     // 只做 state 1（拖拽中）：真机实验（分支 experiment/pointer-absolute，见 AGENTS.md
     // 「指针模型实验与被否定的假设」）已经证明 detectSpatialPointerEvent 与
     // detectSpatialDragGesture 可以在同一个元素上共存（两者都能触发），所以这不再是一个
@@ -62,6 +76,9 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
     // 拖拽路径，悬停游标是独立的一块工作量（接线悬停事件、决定悬停态的视觉区分），放到
     // 下一轮再做，不是拿"猜的"悬停位置糊弄用户。
     val dragCursorBoard = remember { mutableStateOf<Pt?>(null) }
+    // 上面那个位置到底该画成笔尖环还是橡皮环——`active` 是手势协程里的局部变量，draw lambda
+    // 读不到，所以跟 dragCursorBoard 一样单独存一份 state（Task 5：橡皮光标）。
+    val dragCursorTool = remember { mutableStateOf<Tool?>(null) }
 
     Canvas(
         modifier = modifier
@@ -91,13 +108,19 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                 var lastAcceptedPenPx = Offset.Zero
                 /** null = 当前没有手势在进行。锁存值同时存进 state，实时预览读的是同一份。 */
                 var active: ActiveStyle? = null
-                /** 本次擦除动作累积命中的对象（原始 Item，不带 index）；松手时整批作为一个 Op 提交。 */
-                val erasedThisDrag = mutableListOf<Item>()
-                /** 本次擦除拖拽开始前的文档快照——固定基准，用来在 finishEraseBatch 里换算每个
-                 *  命中对象「删除前」的原始 index；不能用拖拽途中不断收缩的 live doc 当基准，
+                /** 本次擦除拖拽开始前的文档快照——固定基准，用来在 finishEraseBatch 里换算
+                 *  ReplaceItems.removed 的原始 index；不能用拖拽途中不断变化的 live doc 当基准，
                  *  否则同一批里越晚命中的条目 index 会偏低，undo 插回时把图层顺序打乱。
                  *  BoardDoc 不可变，持有这个引用不产生额外拷贝开销。 */
                 var eraseBaseline: BoardDoc? = null
+                /** eraseBaseline 里全部对象的 id 集合，随 eraseBaseline 一起设置——用来判断
+                 *  一次命中触碰的是基准原始对象，还是本次拖拽中途已经切出来的碎片。 */
+                var eraseBaselineIds: Set<ItemId> = emptySet()
+                /** 本次擦除动作累积「碰过的基准对象」的 id；松手时据此从 eraseBaseline 换算
+                 *  ReplaceItems.removed。碎片本身不进这个集合——它们的最终形态要等松手时
+                 *  按 doc 终态收集（见 finishEraseBatch），不能在产生的当下就记下来，因为
+                 *  同一个碎片完全可能被后续采样再切一次。 */
+                val touchedBaselineIds = mutableSetOf<ItemId>()
 
                 detectSpatialDragGesture(
                     context = context,
@@ -113,6 +136,7 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                                 state.livePoints = listOf(p)
                                 lastAcceptedPenPx = cursorPx
                                 dragCursorBoard.value = p
+                                dragCursorTool.value = Tool.Pen
                             }
                             Tool.Shape -> {
                                 state.liveShapeStart = p
@@ -120,8 +144,11 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                             }
                             Tool.Eraser -> {
                                 eraseBaseline = state.doc
-                                erasedThisDrag.clear()
-                                eraseAt(state, p, erasedThisDrag)
+                                eraseBaselineIds = state.doc.items.mapTo(HashSet()) { it.id }
+                                touchedBaselineIds.clear()
+                                dragCursorBoard.value = p
+                                dragCursorTool.value = Tool.Eraser
+                                eraseAt(state, p, eraserRadiusBoard(density, state.viewport), eraseBaselineIds, touchedBaselineIds)
                             }
                             Tool.Pan -> Unit
                         }
@@ -151,12 +178,14 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                                 }
                             }
                             Tool.Eraser -> {
-                                finishEraseBatch(state, eraseBaseline, erasedThisDrag)
+                                finishEraseBatch(state, eraseBaseline, touchedBaselineIds)
                                 eraseBaseline = null
+                                eraseBaselineIds = emptySet()
                             }
                             Tool.Pan, null -> Unit
                         }
                         dragCursorBoard.value = null
+                        dragCursorTool.value = null
                         active = null
                         state.endGesture()
                     },
@@ -165,12 +194,30 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                         state.liveShapeStart = null
                         state.liveShapeEnd = null
                         dragCursorBoard.value = null
+                        dragCursorTool.value = null
                         // 笔/形状在提交前从不改动 doc，取消时丢弃 live 缓冲即可，没有数据要抢救。
-                        // 橡皮不同：拖拽途中已经把命中对象从 doc 里即时移除了（见 eraseAt），
-                        // 取消手势不能让这些移除变成"改过文档、却没有对应撤销记录"的既成事实——
-                        // 用户看到消失的东西已经消失，那就必须能撤销，所以取消与正常松手走同一条路径。
-                        finishEraseBatch(state, eraseBaseline, erasedThisDrag)
-                        eraseBaseline = null
+                        // 橡皮不同：拖拽途中已经把命中对象从 doc 里即时切分掉了（见 eraseAt），
+                        // 取消手势不能让这些切分变成"改过文档、却没有对应撤销记录"的既成事实——
+                        // 用户看到消失/变短的笔迹已经生效，那就必须能撤销，所以取消与正常松手走同一条路径。
+                        //
+                        // 但这条路径必须显式限定在"这次被取消的手势本身就是橡皮"（1b-1 复审发现）：
+                        // onDragCancel 不像 onDragEnd 那样天然按 style.tool 分支，如果不加这个判断，
+                        // 一旦某次手势的终止事件被上游丢掉（eraseBaseline/touchedBaselineIds 没能在
+                        // 正常路径里清空），下一次即使是完全不相关的 Pen/Shape 手势被取消，也会无条件
+                        // 把陈旧的 eraseBaseline/touchedBaselineIds 拿去记一笔 ReplaceItems——`added`
+                        // 算的是"此刻 doc 里不属于那份陈旧基准的对象"，会把陈旧基准之后新画的笔迹一起
+                        // 错记成"这次擦除产生的碎片"，撤销时连带删掉用户的新笔迹，redo 还会在
+                        // ReplaceItems.applyTo 里把它们重新插入一遍变成重复。选择在调用点加 tool 判断，
+                        // 而不是改成"每次 onDragStart 都清空橡皮 scratch 状态"，是因为现有的橡皮
+                        // onDragStart 分支本来就会用当次拖拽的 state.doc 重新整套覆盖这三个变量
+                        // （eraseBaseline/eraseBaselineIds/touchedBaselineIds.clear()），下一次真正的
+                        // 橡皮手势开始时陈旧状态自然被覆盖、不会泄漏；真正的风险只在于"非橡皮手势的
+                        // cancel 不该动用这些变量"，加在调用点最小、最直接地堵住这一条路径。
+                        if (active?.tool == Tool.Eraser) {
+                            finishEraseBatch(state, eraseBaseline, touchedBaselineIds)
+                            eraseBaseline = null
+                            eraseBaselineIds = emptySet()
+                        }
                         active = null
                         state.endGesture()
                     },
@@ -191,7 +238,12 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                             }
                         }
                         Tool.Shape -> if (state.liveShapeStart != null) state.liveShapeEnd = p
-                        Tool.Eraser -> eraseAt(state, p, erasedThisDrag)
+                        Tool.Eraser -> {
+                            // 橡皮游标要跟手：跟笔尖游标一样，每个事件都如实更新"系统当下认为
+                            // 擦除中心在哪"，不受任何采样过滤影响。
+                            dragCursorBoard.value = p
+                            eraseAt(state, p, eraserRadiusBoard(density, state.viewport), eraseBaselineIds, touchedBaselineIds)
+                        }
                         // 平移是纯视口变化：不提交、不入撤销栈，视口本就不是文档的一部分。
                         // 用 value.dragAmount（本次增量，屏幕像素）而不是 cursorPx（累计绝对值），
                         // panBy 要的是这一帧的位移量，不是从手势起点算起的位移总量。
@@ -226,42 +278,109 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                 state.liveColorArgb, state.liveWidthDp, state.viewport, density,
             )
         }
-        // 游标最后画，叠在已提交内容和实时预览之上，永远看得见。
+        // 游标最后画，叠在已提交内容和实时预览之上，永远看得见。画成笔尖环还是橡皮环
+        // 由 dragCursorTool 决定——两者共用同一个位置 state，但语义、颜色、半径来源都不同
+        // （Task 5：橡皮环半径必须等于 eraserRadiusBoard，即 eraseAt 真正用来命中测试的
+        // 那个半径，不能另起一个数）。Shape/Pan 拖拽不产生游标，穷举写出来只是为了让
+        // `when` 保持对 Tool? 的完整覆盖，不是真的会画什么。
         dragCursorBoard.value?.let { pos ->
-            drawPenCursor(pos, state.liveWidthDp, scheme.interaction, state.viewport, density)
+            when (dragCursorTool.value) {
+                Tool.Pen -> drawPenCursor(pos, state.liveWidthDp, scheme.interaction, state.viewport, density)
+                Tool.Eraser -> drawEraserCursor(
+                    pos, eraserRadiusBoard(density, state.viewport), scheme.error, state.viewport, density,
+                )
+                Tool.Shape -> Unit
+                Tool.Pan -> Unit
+                null -> Unit
+            }
         }
     }
 }
 
 /**
- * 命中的对象立即从文档移除（即时反馈），并记入本次擦除批次 [acc]。
- * [acc] 与 [EditorState.doc] 天然不会重复记录同一对象：一个对象一旦被移除，
- * 它就从 doc.items 里消失，同一次拖拽后续的采样点即使扫过同一位置也再命中不到它，
- * 所以这里不需要额外的去重逻辑。
+ * 命中的对象立即切分（即时反馈）：Stroke 直接切它的点列，ShapeItem 先经 [ShapeOutline.toPoints]
+ * 转成点列再走同一个 [StrokeSplit.split]，产出的碎片都是 Stroke，颜色/线宽沿用原对象。
+ * 碎片当场写回 [EditorState.doc]（不入撤销栈），用户能看到笔迹被划断的实时反馈。
+ *
+ * 命中对象若是 [baselineIds] 里的基准对象，记入 [touchedBaselineIds]——这是松手时换算
+ * `ReplaceItems.removed` 的依据。命中对象若不在 baselineIds 里，说明它是本次拖拽中途已经
+ * 切出来的碎片，不需要（也不能）再记一次「基准对象」：它的最终形态由 doc 的终态决定，
+ * 松手时按 doc 直接收集（见 finishEraseBatch），不在这里提前记账。
+ *
+ * **命中不等于真的擦掉了什么**（1b-1 复审发现）：[HitTest] 判定的是到连续几何的距离，
+ * 椭圆包围盒近似在四角附近还有已知的误判区（见 `AGENTS.md` 遗留问题清单），命中完全可能
+ * 发生在橡皮圈根本没扫中任何采样点的地方。[fragmentsOf] 返回 `null` 表示这次命中是这样的
+ * 空操作——此时既不替换这个对象、不铸造新 `ItemId`，也不把它计入 [touchedBaselineIds]：
+ * 一次没有实际擦除任何东西的命中，不应该在文档里留下痕迹，也不该消耗一次撤销记录。
+ *
+ * 一次采样可能同时命中多个对象：按 index 降序依次替换，保证还没处理的命中的 index
+ * 不会被前面的替换改变长度而错位。
  */
-private fun eraseAt(state: EditorState, p: Pt, acc: MutableList<Item>) {
-    val hits = HitTest.eraseHits(state.doc, p, ERASER_RADIUS)
+private fun eraseAt(
+    state: EditorState,
+    p: Pt,
+    radiusBoard: Float,
+    baselineIds: Set<ItemId>,
+    touchedBaselineIds: MutableSet<ItemId>,
+) {
+    val hits = HitTest.eraseHits(state.doc, p, radiusBoard)
     if (hits.isEmpty()) return
-    acc += hits.map { it.item }
-    state.removeWithoutUndo(hits.map { it.item.id }.toSet())
+
+    val items = state.doc.items.toMutableList()
+    var changed = false
+    for (hit in hits.sortedByDescending { it.index }) {
+        val fragments = fragmentsOf(state, hit.item, p, radiusBoard) ?: continue
+        items.removeAt(hit.index)
+        items.addAll(hit.index, fragments)
+        if (hit.item.id in baselineIds) touchedBaselineIds += hit.item.id
+        changed = true
+    }
+    if (changed) state.setDocWithoutUndo(BoardDoc(items))
 }
 
 /**
- * 收尾一次擦除批次：命中过就整批入栈成一个 [RemoveItems] Op（文档已经改过了，这里只记账，
- * 不再 applyTo），命中为空就什么都不做——一个"什么都没发生"的撤销条目比没有条目更糟。
- * 无论走 onDragEnd 还是 onDragCancel，这一步都必须做，因为擦除已经在拖拽途中把命中对象
- * 从文档里即时移除了；两条路径共用同一个函数，避免各自维护一份而逐渐走样。
- *
- * 每个条目的 index 从 [baseline]——本次拖拽开始前的文档快照——里换算，而不是从命中时的
- * live doc 里取：拖拽途中 eraseAt 每命中一次，live doc 就整体收缩一次，用它当场记下的
- * index 只对"那一刻"成立，同一批里混用不同时刻的 index 会让 insertAll 插回的顺序错乱
- * （两个条目都可能落到同一个 shift 后的位置）。所有条目相对同一份 baseline 换算，
- * 就都在同一个坐标系里，insertAll 才能精确还原原始 z 序。
+ * 把一个命中对象在 [center]/[radiusBoard] 处切开，产出存活段构成的 Stroke 碎片列表；
+ * 若 [StrokeSplit.split] 只切出一段、且这一段的长度等于输入点数（即没有任何点被删除），
+ * 说明这是一次没有实际擦除效果的空命中，返回 `null` 让调用方原样跳过这个对象。
  */
-private fun finishEraseBatch(state: EditorState, baseline: BoardDoc?, acc: MutableList<Item>) {
-    if (acc.isEmpty()) return
-    val base = baseline ?: return   // 不会发生：acc 非空意味着 onDragStart 已经设置过 baseline
-    val entries = acc.map { item -> IndexedItem(base.items.indexOfFirst { it.id == item.id }, item) }
-    state.pushEraseBatch(entries)
-    acc.clear()
+private fun fragmentsOf(state: EditorState, item: Item, center: Pt, radiusBoard: Float): List<Stroke>? {
+    val points: List<Pt>
+    val colorArgb: Int
+    val widthDp: Float
+    when (item) {
+        is Stroke -> { points = item.points; colorArgb = item.colorArgb; widthDp = item.widthDp }
+        is ShapeItem -> { points = ShapeOutline.toPoints(item, radiusBoard); colorArgb = item.colorArgb; widthDp = item.widthDp }
+    }
+    val runs = StrokeSplit.split(points, center, radiusBoard)
+    if (runs.size == 1 && runs[0].size == points.size) return null
+    return runs.map { pts -> Stroke(state.newId(), colorArgb, widthDp, pts) }
+}
+
+/**
+ * 收尾一次擦除批次：命中过就把整批记账成一个 [ReplaceItems] Op（文档在拖拽途中已经改过了，
+ * 这里只记账，不再 applyTo），命中为空就什么都不做——一个"什么都没发生"的撤销条目比没有
+ * 条目更糟。无论走 onDragEnd 还是 onDragCancel，这一步都必须做，因为擦除已经在拖拽途中
+ * 把命中对象从文档里即时切分掉了；两条路径共用同一个函数，避免各自维护一份而逐渐走样。
+ *
+ * - `removed`：[touchedBaselineIds] 里每个 id 从 [baseline]——本次拖拽开始前的文档快照——
+ *   换算出的原始 index + 对象本身。
+ * - `added`：**此刻**（松手/取消这一时刻）[EditorState.doc] 里所有不属于 baseline 的对象，
+ *   连同它们此刻的 index。不能在碎片产生的当下就记下来——早产生的碎片完全可能被后续采样
+ *   再切一次，只有松手时读到的才是它的终态。因为 doc 在整个拖拽期间只会发生「移除基准对象
+ *   或更早的碎片、插入新碎片」这一种变化，此刻 doc 里"id 不在 baseline 里"的对象精确等于
+ *   全部存活碎片，"id 在 baseline 里"的对象精确等于未被碰过的幸存原对象——不需要另外做
+ *   累计位移的算术，doc 的当前顺序本身就是最终顺序。
+ */
+private fun finishEraseBatch(state: EditorState, baseline: BoardDoc?, touchedBaselineIds: MutableSet<ItemId>) {
+    if (touchedBaselineIds.isEmpty()) return
+    val base = baseline ?: return   // 不会发生：touchedBaselineIds 非空意味着 onDragStart 已经设置过 baseline
+    val baselineIds = base.items.mapTo(HashSet()) { it.id }
+    val removed = touchedBaselineIds
+        .map { id -> val i = base.items.indexOfFirst { it.id == id }; IndexedItem(i, base.items[i]) }
+        .sortedBy { it.index }
+    val added = state.doc.items.withIndex()
+        .filter { (_, item) -> item.id !in baselineIds }
+        .map { (i, item) -> IndexedItem(i, item) }
+    state.pushEraseBatch(removed, added)
+    touchedBaselineIds.clear()
 }

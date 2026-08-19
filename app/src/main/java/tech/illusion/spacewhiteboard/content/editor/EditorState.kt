@@ -100,17 +100,24 @@ class EditorState(initialDoc: BoardDoc, initialNextId: Long) {
     fun redo() { doc = undoStack.redo(doc); afterMutation() }
 
     /**
-     * 擦除途中的即时移除：改文档但不入撤销栈。
-     * 配套的 [pushEraseBatch] 在松手时一次性把整批入栈 —— 这样一次擦除只对应一次撤销。
+     * 擦除途中的即时切分：改文档但不入撤销栈。
+     * 配套的 [pushEraseBatch] 在松手时一次性把整批记账为一个 [ReplaceItems] —— 这样一次擦除
+     * 只对应一次撤销。取 [BoardDoc] 整体而不是增删 id 集合，因为切分既要移除命中对象、
+     * 也要在同一个位置插入碎片，调用方（CanvasSurface.eraseAt）已经把两步都做完了。
      */
-    fun removeWithoutUndo(ids: Set<ItemId>) {
-        doc = doc.removeIds(ids).first
+    fun setDocWithoutUndo(newDoc: BoardDoc) {
+        doc = newDoc
         revision++
     }
 
-    /** 把一次擦除动作累积的全部命中作为单个 Op 入栈（文档已经改过了，这里只记账，不再 applyTo）。 */
-    fun pushEraseBatch(entries: List<IndexedItem>) {
-        undoStack.push(RemoveItems(entries))
+    /**
+     * 把一次擦除动作记账为单个 [ReplaceItems]（文档在拖拽途中已经改过了，这里只记账，
+     * 不再 applyTo）。[removed] 为空时什么都不做——一个"什么都没发生"的撤销条目比没有
+     * 条目更糟，调用方（CanvasSurface.finishEraseBatch）也会做同样的判空，这里再挡一层。
+     */
+    fun pushEraseBatch(removed: List<IndexedItem>, added: List<IndexedItem>) {
+        if (removed.isEmpty()) return
+        undoStack.push(ReplaceItems(removed, added))
         canUndo = undoStack.canUndo
         canRedo = undoStack.canRedo
     }

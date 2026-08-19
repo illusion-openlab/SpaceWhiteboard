@@ -200,6 +200,19 @@ private fun inkStyle(widthDp: Float) =
 private const val PEN_CURSOR_RING_STROKE = 1.5f
 
 /**
+ * 橡皮游标的环形描边宽度，**屏幕空间常量** dp（1b-1 复审发现的 bug）——不能借用
+ * [PEN_CURSOR_RING_STROKE]：那个常量的单位是 board units，在 `withTransform` 已经叠了
+ * `scale(viewport.scale * density, ...)` 的坐标系下直接使用，画出来的描边宽度会随
+ * `viewport.scale` 变化（0.5× 时只有 0.75dp、4× 时变成 6dp），而 `AGENTS.md` 明确声称橡皮
+ * 游标"整体是屏幕空间常量"——半径已经是（见 [drawEraserCursor] 直接吃 `radiusBoard`
+ * 这个已经按屏幕像素换算过的值），描边宽度却漏了这一步，导致声明与实现不一致。
+ * 用法见 [drawEraserCursor]：换算成 board units 时除以 `viewport.scale`（这里已经在
+ * board-space 坐标系内，不需要再乘/除 density），得到的描边在屏幕上永远是这个 dp 值，
+ * 不随缩放变化，笔尖游标与橡皮游标各自的描边缩放行为因此互不干扰。
+ */
+private const val ERASER_CURSOR_RING_STROKE_DP = 1.5f
+
+/**
  * 笔尖游标（Task 19 修复轮）：只在屏幕渲染路径调用，从不并入 [drawBoard]——
  * 游标不是文档内容，PNG 导出（`export.BoardRenderer`）只调 [drawBoard]，天然看不到它，
  * 不需要额外开关去把它排除在导出之外。
@@ -228,6 +241,53 @@ fun DrawScope.drawPenCursor(
                 radius = widthDp / 2f,
                 center = Offset(pos.x, pos.y),
                 style = StrokeStyle(width = PEN_CURSOR_RING_STROKE, cap = StrokeCap.Round),
+            )
+        }
+    }
+}
+
+/**
+ * 橡皮游标（Task 5，局部擦除跟随轮）：与 [drawPenCursor] 同样只在屏幕渲染路径调用、从不并入
+ * [drawBoard]——PNG 导出（`export.BoardRenderer`）只调 [drawBoard]，天然看不到它。
+ *
+ * 半径直接吃调用方传入的 [radiusBoard]，不在这里重新计算——调用点（`CanvasSurface`）传的是
+ * `eraserRadiusBoard(density, viewport)`，跟 `eraseAt` 真正拿去做命中测试的半径是同一份换算
+ * 结果，两处永远读同一个来源，环画多大就真的擦多大。热区本身是屏幕空间常量（Task 4a
+ * `ERASER_RADIUS_PX`），所以这个环在屏幕上尺寸恒定、不随 `viewport.scale` 缩放——这是预期
+ * 行为，不是需要"修"的缩放缺陷：笔尖游标画的是"这一笔会有多粗"（画布几何量，理应随缩放
+ * 变化），橡皮游标画的是"手指划过多宽一圈算擦到"（屏幕手势量，不该随缩放变化）。
+ * **描边宽度也必须是屏幕空间常量**（1b-1 复审修复的 bug）：半径是，但环的描边宽度之前
+ * 借用了 [PEN_CURSOR_RING_STROKE]（board units 常量），在这个已经叠了 `viewport.scale`
+ * 的坐标系里直接用，等于描边宽度随缩放变化——同一个"屏幕空间常量"的游标，一半（半径）真
+ * 一半（描边）假。现在用专属的 [ERASER_CURSOR_RING_STROKE_DP] 并除以 `viewport.scale`
+ * 抵消坐标系自带的缩放，两半才真的统一成同一种缩放行为。
+ *
+
+ * 颜色取 [WhiteboardColorScheme] 的 `error` 角色（警示/危险语义，天然贴合"即将删除"），
+ * 与笔尖游标固定用的 `interaction`（蓝）色相不同，一眼能分清当前是画还是擦，不新增颜色
+ * 字面量。裁剪与笔尖游标一致：先 `withTransform` 再 [clipToPaper]，游标本身也不该画到
+ * 纸面之外。
+ */
+fun DrawScope.drawEraserCursor(
+    pos: Pt,
+    radiusBoard: Float,
+    color: Color,
+    viewport: Viewport,
+    density: Float,
+) {
+    withTransform({
+        translate(viewport.offsetX * density, viewport.offsetY * density)
+        scale(viewport.scale * density, viewport.scale * density, pivot = Offset.Zero)
+    }) {
+        clipToPaper(viewport) {
+            drawCircle(
+                color = color,
+                radius = radiusBoard,
+                center = Offset(pos.x, pos.y),
+                style = StrokeStyle(
+                    width = ERASER_CURSOR_RING_STROKE_DP / viewport.scale,
+                    cap = StrokeCap.Round,
+                ),
             )
         }
     }

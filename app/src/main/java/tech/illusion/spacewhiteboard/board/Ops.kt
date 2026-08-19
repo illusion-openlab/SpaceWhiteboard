@@ -26,3 +26,36 @@ data class TransformItem(val before: Item, val after: Item) : Op {
     override fun applyTo(doc: BoardDoc): BoardDoc = doc.replace(after)
     override fun revertFrom(doc: BoardDoc): BoardDoc = doc.replace(before)
 }
+
+/**
+ * 一批对象换成另一批 —— 局部擦除专用：一条笔迹被擦断后变成 N 条碎片。
+ *
+ * [added] 用 IndexedItem 而不是裸 Item，是因为碎片必须回到原对象所在的图层位置；
+ * 追加到末尾会让被擦过的笔迹莫名跑到所有内容的最上面。
+ *
+ * **Index contract:** Both [removed] and [added] indices are positions in the document **as it will be
+ * after the operation completes** — i.e. [added] indices are final-document positions computed with
+ * cumulative accounting, not raw indices in the original or intermediate document.
+ *
+ * If a caller mistakenly passes original-document indices for [added], fragments from an earlier
+ * group may be inserted in the wrong layer order. Example: starting from [A, B, C, D], if A becomes
+ * two fragments [a0, a1] and C becomes [c0, c1], the correct indices are a0:0, a1:1, c0:3, c1:4
+ * (final positions). Passing c0:2, c1:3 (original C position + offset) instead would produce
+ * [a0, a1, c0, c1, B, D] — B is pushed after all of C's fragments. Callers must compute final indices
+ * by accounting for all earlier removals and insertions.
+ *
+ * **Id uniqueness assumption:** [added] item ids must not collide with ids of surviving items
+ * (items not in [removed]). If a collision occurs, [revertFrom] would incorrectly delete the
+ * surviving item when removing [added] ids. This is unreachable in practice because fragment ids
+ * come from a monotonic counter that never reissues, but it is a stated invariant.
+ */
+data class ReplaceItems(
+    val removed: List<IndexedItem>,
+    val added: List<IndexedItem>,
+) : Op {
+    override fun applyTo(doc: BoardDoc): BoardDoc =
+        doc.removeIds(removed.map { it.item.id }.toSet()).first.insertAll(added)
+
+    override fun revertFrom(doc: BoardDoc): BoardDoc =
+        doc.removeIds(added.map { it.item.id }.toSet()).first.insertAll(removed)
+}
