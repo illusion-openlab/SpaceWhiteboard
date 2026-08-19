@@ -25,7 +25,7 @@
 
 **阶段 1a 明确没有做**（属于阶段 1b / 2，不要现在补）：
 
-- **没有文字工具**（`TextItem` 及其输入面板）——规格 §7.3 的系统软键盘 vs 自绘键盘查证还没做
+- ~~没有文字工具~~ ——**阶段 1b-2 已交付**，见下面「阶段 1b-2 交付了什么：文字工具」
 - **没有插入图片**（`ImageItem`、App 内选图网格、`AssetStore`）
 - **没有选择工具**（选中/移动/缩放/删除已放置对象的选框与手柄、上下文条）——`Stroke`/`ShapeItem` 目前一旦画完就不能再单独移动或缩放，只能整体撤销或用橡皮擦删除
 - **没有项目/白板组织层**（项目列表、白板列表、新建/重命名/删除、缩略图封面）——阶段 1a 固定写死 `projects/default/boards/main.wbd` 一份文档
@@ -41,6 +41,109 @@
 - **后果，用户已知并接受这个取舍**：被局部擦过的形状不再是"形状"——它变成了若干条 `Stroke`。`Stroke` 目前不支持被选中，所以一个被擦过一部分的矩形/圆/直线，以后再也无法用 1b-3 的选择工具整体选中、移动或改色，只能继续擦除或整体撤销。这不是 bug，是当前架构下矢量切分方案的固有代价，做决定时已经权衡过。
 - **橡皮半径与橡皮光标都是屏幕空间常量**（`ERASER_RADIUS_PX`），不随 `viewport.scale` 缩放；命中测试与绘制光标用的是同一个表达式 `eraserRadiusBoard(density, viewport)`，所以光标显示的圈永远等于真实热区，不会出现"看着能擦到、实际擦不到"的错位。这与画笔的笔尖游标相反——笔尖游标随墨迹一起缩放。**这个不一致是故意的，不要为了"两个游标看起来统一"去改它**：橡皮的语义是"手部动作扫过的物理范围"，缩放画面时这个物理范围在屏幕上应该保持不变；笔尖游标的语义是"这一笔会落在纸面的哪个点"，本该跟着墨迹一起缩放，统一成同一种缩放行为会让其中一个游标开始说谎。
 - 由此关闭两条来自 1a 的待办：**橡皮半径不再随缩放变化**（现在是屏幕空间常量）；**橡皮擦现在有可见光标**，且光标半径与真实热区精确一致。
+
+## 阶段 1b-2 交付了什么：文字工具
+
+点画布、系统软键盘打字、确认后文字成为画布内容——随文档一起保存、重启恢复、缩放、导出。
+
+> **用户会立刻撞到的限制，写在最前面：文字目前不可删除单个对象。** 橡皮擦显式忽略 `TextItem`
+> （见下），选择工具要到 **1b-4** 才会出现。本阶段放置的文字，唯一能拿掉它的办法是**撤销**
+> （必须在放置后立刻做，一旦中间夹了别的操作就够不到）或**清空**（整块白板全部清除）。这不是
+> bug，是分期交付的已知代价，交付时必须向用户说清楚，不要含糊过去。
+
+- **`TextItem`**（`board/Item.kt`）加入 `Item` 密封接口家族，字段：`id`、`text`（原始字符串，
+  未 trim、未转义）、`colorArgb`、`sizeBoard`（字号）、`anchor`（左上角 `Pt`）、`wBoard`（换行
+  宽度）、`hBoard`（测量出的高度）。`bounds()` 直接是 `(anchor.x, anchor.y)` 到
+  `(anchor.x + wBoard, anchor.y + hBoard)` 的矩形，参与 `contentBounds()`（进而 PNG 导出裁切）。
+- **`sizeBoard`/`wBoard`/`hBoard` 全部是画布单位（board units），不是 `sp`。** 这是刻意背离规格
+  原文里 `sizeSp` 措辞的决定：白板上的文字是**画布内容**，跟笔迹/形状一样要随 `viewport.scale`
+  一起缩放——用户放大画布细看时，文字应该跟着墨迹一起变大。如果用 `sp`，文字大小由系统排版
+  管道换算、天生跟屏幕密度绑定、不跟随画布缩放，缩放倍率越高文字相对墨迹越小，读起来会像是
+  文字"缩水"了。`sizeBoard`/`wBoard`/`hBoard` 与 `Stroke.widthDp` 走的是同一套处理方式：都是
+  画布单位字面量，只在 `drawBoard` 外层的 `withTransform`（`translate` + `scale`）里被放大一次，
+  函数体内部从不再乘 density。
+- **`wBoard`/`hBoard` 是创建时由 UI 层测量后存下来的固定值，`board/` 包本身无法重新测量**——
+  `board/` 零 Compose import（硬不变量之一），量不了字。这意味着一旦存进 `TextItem`，这两个
+  数字就固定了，不会因为设备、字体、或运行时环境不同而"自动纠正"；`measureTextLayout`（见下
+  「`measureTextLayout` 是三个测量输入的唯一来源」一节）因此必须在创建时与渲染时被两个调用方
+  以完全一致的输入调用。
+
+### `t` 行格式与 base64
+
+`board/BoardCodec.kt`：
+
+```
+t <argb8位小写hex> <sizeBoard> <x>,<y> <wBoard> <hBoard> <base64(utf8 text)|->
+```
+
+- **文字必须 base64。** `wbd1` 是按空格分词、按行分隔的纯文本格式；用户打的文字里随时可能出现
+  空格、tab、换行——这些字符原样写进去会把一行"撕成"多个 token 或多行，解码时序号全部错位。
+  base64 把任意字节编码成只含 `A-Za-z0-9+/=` 的字符串，天然不含空格/tab/换行，绕开了这个问题。
+- **空文本哨兵 `-`。** base64 编码空字符串会产出空串，而 `decode` 按空格分词后过滤掉空 token，
+  于是一个文本为空的 `t` 行会**少一个 token**、被当成畸形行整行跳过——用户在输入面板里什么都
+  不打直接点确认就会触发（实际上这条路径已经在 `TextInputSheet.commitText` 里被挡掉了：空白
+  文本直接 `cancelTextPlacement()`，根本不会走到编码；但 `BoardCodec` 自己也要对这种输入保持
+  健壮，因为编解码器不能假设调用方永远守规矩）。解法是文本为空时第 7 个 token 显式写成单个
+  字符 `-`，而不是 base64 编码结果。**这个哨兵不会与任何真实 base64 输出冲突**：base64 字母表
+  是 `A-Za-z0-9+/=`，永远不产出裸 `-`，`-` 因此可以安全地被 `decode` 识别为"这是空文本"而不是
+  "这是一段畸形 base64"。
+- **`HEADER` 保持字面量 `wbd1`，不升版本号。** 这正是 1a/1b 分期承诺的向后兼容：`decode` 对任何
+  无法识别的行前缀（1a 时代的 `t`、现在的 `i`）都跳过并计入 `skippedLines`，不抛异常。所以一份
+  1b-2 存的、含 `t` 行的文档，拿一个只认 `wbd1` 头 + `s`/`h` 行的 1a 版本 App 打开，会正常跳过
+  每一个 `t` 行、计数、继续解析剩下的笔迹/形状——不会解码失败、也不会丢整份文档，只是那些文字
+  在旧版本里看不见。反过来，1b-2 的 `decode` 同样跳过它还不认识的 `i` 行（1b-3 的图片），已用
+  `BoardCodecTextTest` 的 "an unknown prefix is still skipped rather than fatal" 锁定。
+
+### `measureTextLayout` 是三个测量输入的唯一来源
+
+`content/editor/BoardDrawing.kt` 的 `internal fun measureTextLayout(text, sizeBoard, wBoard,
+measurer)` 是屏幕渲染路径（`drawTextItem`）与创建时测量路径（`TextInputSheet.commitText`，用来
+算出存进 `TextItem.hBoard` 的高度）**共用的唯一入口**。三个测量输入——`TextStyle(fontSize =
+sizeBoard.sp)`、`Constraints(maxWidth = wBoard.roundToInt().coerceAtLeast(1))`（含四舍五入）、
+`density = TEXT_MEASURE_DENSITY`（`Density(1f, 1f)`）——全部封在这一个函数体内，两个调用方只
+传 `text`/`sizeBoard`/`wBoard`/`measurer` 四个参数，不可能各自维护一份、迟早对不上。
+
+- **`Density(density = 1f, fontScale = 1f)` 同时钉死两个量。** `density = 1f` 让 `sizeBoard.sp`
+  换算出的像素数值上直接等于 `sizeBoard` 本身（缩放完全交给 `drawBoard` 外层的
+  `scale(viewport.scale * density, ...)` 一次性完成，这里不能再乘一次设备密度，否则变成双重
+  缩放）；`fontScale = 1f` 是故意**屏蔽系统无障碍字体缩放设置**——白板上的文字是文档内容，不该
+  跟着"这台设备/这个用户把系统字体调大了多少"变化，否则同一份存档在不同用户的设备上会量出不
+  同的换行结果和 `hBoard`，缩放和位置也会跟着漂移。
+- **为什么不能把这三个输入拆开重新分别传。** 如果两个调用方各自手写
+  `TextStyle`/`Constraints`/`density` 三个参数（Task 3 最初就是这么写的），"两处输入一致"就完全
+  依赖"写代码的人对照注释抄一遍、以后改动时记得同步改两处"——这正是本项目反复踩到的那类 bug
+  的形状（另一个真实案例见下文 `canvas.paper` 圆角）。抽成 `measureTextLayout` 这一个函数后，
+  "输入相同"由函数签名本身保证。**如果以后又把这三个输入重新拆开写在两个地方，后果不是编译
+  报错或立刻可见的 bug，而是存进文档的 `hBoard`（创建时测量）与实际渲染出来的高度悄悄不同
+  步——症状会先在 PNG 导出上出现：导出的图片把文字底部裁掉一截**（因为 `contentBounds()` 用的
+  是 `hBoard`，而画出来的字形实际更高或更矮），而屏幕上什么都看不出异常，非常隐蔽。
+- 唯一仍未消除的风险点是 `wBoard.roundToInt()` 的四舍五入：`Constraints` 吃 `Int` px，`wBoard`
+  是 `Float` board units，极端情况下（换行宽度刚好卡在某个词的临界宽度上）四舍五入误差可能改变
+  "要不要在这个词处换行"的判定，从而多算或少算一行高度。这个风险现在只存在于
+  `measureTextLayout` 内部**一处**，两个调用方永远读到同一次 `roundToInt()` 的结果，不会出现
+  "渲染换的行"与"创建时存的行"互相打架。
+
+### 已知但只能靠设备现场判断的观察
+
+- **`TextInputSheet` 不跟随锚点，用 `Alignment.Center` 把 420dp 卡片固定在屏幕正中。** 一次靠近
+  屏幕中心的点击，输入面板会正好盖住刚点的那个位置——打字期间完全看不到文字将落在哪。**Task 5
+  原计划用真机 `PB311XKGL4160087B` 验证，但真机在验证途中从 adb 掉线（USB/会话断开，很可能是
+  人取走或拔线），改用模拟器 `emulator-5554` 完成了这一条的截图取证**：见
+  `.superpowers/sdd/2026-08-19-space-whiteboard-1b2-text/shots/task5-1-sheet-covers-tap.png`——
+  锚点选在画布中心附近，截图确认面板确实盖住了刚"点击"的那个位置（已放置的文字只有右侧一段
+  露在卡片外，左侧被卡片盖住）。**这条观察不是真人手势点出来的**：设备旁没有操作者，用一个
+  临时 hook 直接调用 `state.beginTextPlacement`（与 `CanvasSurface` 里 `Tool.Text` 真实点击
+  分支调用的是同一个函数）驱动出这个界面状态——布局与遮挡关系是真实渲染管线产出的，可信；但
+  "用户真的用射线点一下会不会点在这个位置、点完的手感如何"仍然没有被验证过，只能等真机可用
+  时补测。如果以后要修这条遮挡问题，思路是让面板偏移锚点而不是固定屏幕居中，这次没有做——只
+  记录现场判断的结果，不做架构变更。
+- **导出 PNG 与屏幕文字的字体度量是否一致：已通过模拟器验证一致。** 同一次 hook 驱动流程里，
+  在画布上放置文字后直接调用真实的 `onExport()`（`Main.kt` 里导出按钮调的同一个 lambda），
+  拉取 `Pictures/SpaceWhiteboard/whiteboard-*.png` 与截图对比：换行位置完全一致（都是在同一个
+  词之后换行），两行文字都完整可见、底部没有被裁切——`export/BoardRenderer.kt` 用
+  `createFontFamilyResolver(context)`、屏幕渲染用 `LocalFontFamilyResolver.current`，构造路径
+  不同，但在本机系统默认字体（未声明任何自定义字体）下量出的字形度量与换行结果一致。
+  见 `task5-2-placed-text-on-canvas.png`（屏幕）与 `task5-3-exported-png.png`（导出）。
 
 ## 三个坐标空间与换算公式（全项目最容易踩错的地方）
 
@@ -102,11 +205,13 @@ scale(viewport.scale * density, viewport.scale * density, pivot = Offset.Zero)
 wbd1
 s <argb8位小写hex> <widthDp> <x>,<y> <x>,<y> ...
 h <Line|Rect|Ellipse> <argb8位小写hex> <widthDp> <x>,<y> <x>,<y>
+t <argb8位小写hex> <sizeBoard> <x>,<y> <wBoard> <hBoard> <base64(utf8 text)|->
 ```
 
-- 首行必须是字面量 `wbd1`（版本号），否则整份解码抛 `CodecException`。
+- 首行必须是字面量 `wbd1`（版本号），否则整份解码抛 `CodecException`。**加 `t` 行没有把版本号
+  升成 `wbd2`**——这就是 1a/1b 分期承诺的向后兼容本身，见下一条。
 - **`ItemId` 不进文件**：解码时按出现顺序重新分配 `ItemId(1)`、`ItemId(2)`……
-- **前向兼容约定，1b 依赖它免迁移**：任何无法识别的行前缀（1b 将追加的 `t`/`i`）在解码时被**跳过并计入 `skippedLines`**，不抛异常、不中断解码。任何格式错误的一行（列数不对、颜色不是合法 hex、点数不够）同样降级为跳过计数，绝不让一行坏数据毁掉整份文档。
+- **前向兼容约定，1b 依赖它免迁移**：任何无法识别的行前缀（1b-2 的 `t`、1b-3 将追加的 `i`）在解码时被**跳过并计入 `skippedLines`**，不抛异常、不中断解码。任何格式错误的一行（列数不对、颜色不是合法 hex、点数不够）同样降级为跳过计数，绝不让一行坏数据毁掉整份文档。`t` 行的文本字段必须 base64（原始文字可能含空格/tab/换行，会撕碎这个按空格分词的行式格式），空文本用哨兵 `-`（base64 字母表 `A-Za-z0-9+/=` 永远不产出裸 `-`，不会与真实编码冲突）——完整理由见上面「阶段 1b-2 交付了什么：文字工具」。
 - `unhex` 用 `Long.parseLong(s, 16).toInt()`，不是 `s.toInt(16)`——后者对任何最高位为 1 的 8 位 ARGB 颜色（不透明色几乎全是）会直接抛异常。
 
 ## 硬不变量（改代码前必须知道,否则容易在不知不觉中破坏它们）
@@ -134,7 +239,30 @@ h <Line|Rect|Ellipse> <argb8位小写hex> <widthDp> <x>,<y> <x>,<y>
 - Task 6（2026-08-19，真机 `PB311XKGL4160087B`）：`app-debug.apk` 装机成功（`adb install -r -d`），`dumpsys activity activities` 确认 `topResumedActivity`/`ResumedActivity` 均为 `tech.illusion.spacewhiteboard/.platform.LaunchActivity`，`adb logcat -b crash` 中无本包任何记录。这只证明**装得上、起前台、没崩**，不证明局部擦除好不好用。
 - **局部擦除的"手感"已经过真机验证（此前长期标记为"完全未验证"，现已更正）。** 用户在真机 PICO Swan 上完整试玩了一整轮擦除操作，确认：擦除确实生效（不是命中却没反应），橡皮热区大小（`ERASER_RADIUS_PX = 24f`）的手感合适，不需要再调。切分算法本身（`StrokeSplit`）、轮廓采样（`ShapeOutline`）、`ReplaceItems` 的索引正确性此前已由单测锁定；这一条补上的是单测和模拟器截图都够不到的"手感"这一半。**这条结论不覆盖 1b-1 复审新加的过渡采样修法**（见下文「橡皮擦局部切分只保证咬到采样点，不保证咬到几何」）——那个修法本身有单测锁定，但它改变了 `ShapeOutline` 的采样密度，还没有专门重新跑一轮真机手感验证；已知它不会让手感变差（采样只会变密，不会变疏），只是没有独立证据。
 
+- 1b-2（文字工具）单测：102/102 全绿（14 个测试类，`--rerun-tasks` 重跑非缓存命中），新增
+  `TextItemTest`（`bounds()`、`contentBounds()` 参与、橡皮不影响文字、文字不影响同位置笔迹的
+  可擦除性）与 `BoardCodecTextTest`（`t` 行编解码往返，含空格/tab/换行、空文本哨兵、与
+  `s`/`h` 行混排、畸形行降级为跳过、未知前缀容忍）。`./gradlew :app:assembleDebug` 通过。
+  源码 grep 无 `androidx.compose.material`/`MaterialTheme`；`releaseRuntimeClasspath` 依赖树
+  660 行，grep `-i material` 命中 0 次。
+- Task 5（2026-08-19，模拟器 `emulator-5554`，**不是真机**——见下方说明）：装机、前台确认
+  （`dumpsys activity activities` 轮询 `topResumedActivity` 直到命中本包，不是固定 `sleep`）、
+  `logcat -b crash` 检查——这三条只证明**装得上、起前台、没崩**。文字工具"手感"这一半（下面
+  明确未验证清单）不在这三条覆盖范围内。真机 `PB311XKGL4160087B` 原本是这次验证的目标设备，
+  但在取到设备锁、刚开始装机时就从 `adb devices` 掉线（很可能是人取走或拔了线），之后一直没
+  再出现；改到模拟器上完成了本任务能完成的那部分核实，真机上的装机/前台/crash 检查**这次没
+  有跑到**，留给下一次真机可用时补。
+
 **明确未验证**：
+- **系统输入法弹出的时机与流畅度、中文输入是否正常、点击定位是否准、放置后文字的大小/位置是否
+  符合用户预期——这些都需要用户在真机上亲自打字才能判断。** Task 5 验证时用的是模拟器而不是
+  真机，且设备旁没有人类操作者，用一个临时 hook 直接调用
+  `state.beginTextPlacement`/`state.commit(AddItem(TextItem(...)))` 驱动了**真实的状态与渲染
+  路径**，但没有经过真实的点击手势、没有让系统 IME 真的弹出接收过按键——所以"IME 弹出是否
+  顺畅""中文输入是否正常""点击定位是否准"这三条，Task 5 的证据完全覆盖不到，仍然是纯粹
+  未验证。这份文档所在阶段的可行性调研已经在模拟器上确认过系统软键盘能弹出、能收到字符（见
+  `TextInputSheet` 的类注释：`mCurId=com.bytedance.pico.inputmethod/.PicoIME`、
+  `mInputShown=true`），但那不等于"在真机上顺手"，中文输入、点击定位准不准这些仍然要靠真机。
 - **手感本身没有解决。** 用户报告"不跟手"，已证明与坐标来源（累加 vs 绝对）无关，真正原因（延迟/固定偏移/平滑）没有查清；上文给出的区分实验（先静止后移动）还没有跑过。**不要向用户或下一个会话宣称"跟手问题已修复"**——已经做的只是加了一个诚实反映系统认知位置的游标,缓解了"看不到落墨点"这一半的抱怨,没有触碰"跟手"本身。
 - 窗口拖动改变尺寸时内容是否真的保住（`configChanges` 声明了,但没有真机验证过实际拖拽）。
 - 工具栏各按钮在真实射线/手势下的可点性——模拟器 `adb input tap/swipe` 摸得到输入管线但点不准 SpatialUI 组件的判定,不能作为证据。
