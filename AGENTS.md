@@ -127,14 +127,14 @@ h <Line|Rect|Ellipse> <argb8位小写hex> <widthDp> <x>,<y> <x>,<y>
 ## 已验证的 / 未验证的（不要含糊其辞地都说"已验证"）
 
 **已验证**：
-- `board/` 与 `store/` 的全部逻辑正确性——89/89 JUnit 单测（12 个测试类：1a 的基础上，1b-1 新增 `StrokeSplitTest`、`ShapeOutlineTest`、`OpsReplaceTest`），覆盖几何归一化、`BoardDoc` 增删改与 z 序还原、`Viewport` 坐标互转与缩放边界、`BoardCodec` 编解码往返与损坏容忍、`UndoStack` 各类 Op（含 `ReplaceItems`）、`HitTest`、`StrokeSmoothing`、`BoardStore` 原子写盘与损坏恢复、矢量切分（`StrokeSplit`）、形状轮廓采样（`ShapeOutline`）。2026-08-19 Task 6 在 commit `4822f3d` 上重跑（`--rerun-tasks`，非缓存命中）确认：89/89 全绿，0 失败 0 错误。
+- `board/` 与 `store/` 的全部逻辑正确性——90/90 JUnit 单测（12 个测试类：1a 的基础上，1b-1 新增 `StrokeSplitTest`、`ShapeOutlineTest`、`OpsReplaceTest`），覆盖几何归一化、`BoardDoc` 增删改与 z 序还原、`Viewport` 坐标互转与缩放边界、`BoardCodec` 编解码往返与损坏容忍、`UndoStack` 各类 Op（含 `ReplaceItems`）、`HitTest`、`StrokeSmoothing`、`BoardStore` 原子写盘与损坏恢复、矢量切分（`StrokeSplit`）、形状轮廓采样（`ShapeOutline`）。2026-08-19 Task 6 在 commit `4822f3d` 上重跑（`--rerun-tasks`，非缓存命中）确认：89/89 全绿，0 失败 0 错误——这是 1b-1 复审修复轮**之前**的基线数字。复审轮改了 `ShapeOutlineTest`（`board/ShapeOutline.kt` 的采样签名加了 `radiusBoard` 参数、`Line` 不再只采样两端点）：删掉了一条断言"直线只采样两端点"的测试（这条断言现在描述的是被修掉的 bug，不是期望行为），换成两条断言"直线采样密度跟着橡皮半径变化、擦中点真的会删点"的测试，净增 1 条。`--rerun-tasks` 重跑后确认：**90/90 全绿，0 失败 0 错误**。
 - 模拟器截图（门禁 B）：主题配色真的生效（非 Material 通用灰）、纸面有边界且四周露出根背景、无 Material 观感、文字不截断、清空二次确认覆盖层正确出现且消费指针事件。这只验证了**静态渲染**，不验证任何手感。
 - 真机确认（用户照片 + Task 19/实验分支日志）：自动保存指示（"已保存"）、笔画渲染平滑、闭合曲线正确、固定主题、左侧工具栏、纸面边界——这些是**观感/正确性**层面的确认。
 - 真机采样实测（Task 19）：90Hz / 6.06px 中位步长 / 320dpi，见上文。
 - Task 6（2026-08-19，真机 `PB311XKGL4160087B`）：`app-debug.apk` 装机成功（`adb install -r -d`），`dumpsys activity activities` 确认 `topResumedActivity`/`ResumedActivity` 均为 `tech.illusion.spacewhiteboard/.platform.LaunchActivity`，`adb logcat -b crash` 中无本包任何记录。这只证明**装得上、起前台、没崩**，不证明局部擦除好不好用。
+- **局部擦除的"手感"已经过真机验证（此前长期标记为"完全未验证"，现已更正）。** 用户在真机 PICO Swan 上完整试玩了一整轮擦除操作，确认：擦除确实生效（不是命中却没反应），橡皮热区大小（`ERASER_RADIUS_PX = 24f`）的手感合适，不需要再调。切分算法本身（`StrokeSplit`）、轮廓采样（`ShapeOutline`）、`ReplaceItems` 的索引正确性此前已由单测锁定；这一条补上的是单测和模拟器截图都够不到的"手感"这一半。**这条结论不覆盖 1b-1 复审新加的过渡采样修法**（见下文「橡皮擦局部切分只保证咬到采样点，不保证咬到几何」）——那个修法本身有单测锁定，但它改变了 `ShapeOutline` 的采样密度，还没有专门重新跑一轮真机手感验证；已知它不会让手感变差（采样只会变密，不会变疏），只是没有独立证据。
 
 **明确未验证**：
-- **局部擦除的"手感"完全没有经过任何验证，也没有办法用单测覆盖。** 切分算法本身（`StrokeSplit`）、轮廓采样（`ShapeOutline`）、`ReplaceItems` 的索引正确性都有单测锁定，Task 6 也重跑确认 89/89 绿；但"橡皮热区大小是否合适""擦除的时候是否跟手""碎片断面看起来是否难看"这三件事，单测和模拟器截图都够不到，只能由用户在真机上试出来。**不要把"切分逻辑对"当成"擦除手感好"去汇报——这是两件独立的事，Task 6 只验证了前者。**
 - **手感本身没有解决。** 用户报告"不跟手"，已证明与坐标来源（累加 vs 绝对）无关，真正原因（延迟/固定偏移/平滑）没有查清；上文给出的区分实验（先静止后移动）还没有跑过。**不要向用户或下一个会话宣称"跟手问题已修复"**——已经做的只是加了一个诚实反映系统认知位置的游标,缓解了"看不到落墨点"这一半的抱怨,没有触碰"跟手"本身。
 - 窗口拖动改变尺寸时内容是否真的保住（`configChanges` 声明了,但没有真机验证过实际拖拽）。
 - 工具栏各按钮在真实射线/手势下的可点性——模拟器 `adb input tap/swipe` 摸得到输入管线但点不准 SpatialUI 组件的判定,不能作为证据。
@@ -148,7 +148,8 @@ h <Line|Rect|Ellipse> <argb8位小写hex> <widthDp> <x>,<y> <x>,<y>
 - **没有实现悬停游标。** 笔尖游标目前只覆盖"拖拽进行中"这一种状态。上文「指针模型实验与被否定的假设」已经证明 `detectSpatialPointerEvent`（悬停/未按下）与 `detectSpatialDragGesture` 可以在同一元素上共存（两者都能触发）——这不再是共存性未知项，纯粹是本轮范围裁剪：接线悬停事件、设计悬停态的视觉区分是独立工作量，留到下一轮再做。位置：`content/editor/CanvasSurface.kt` 顶部注释里有完整的决策记录。
 - **`ShapeOutline.toPoints()` 的 `MAX_SAMPLES=256` 会让很大的椭圆擦出来变成可见多边形。** 铺满画布的椭圆（rx=1200, ry=800）周长约 6346，按目标间距需要 793 个采样点，被 clamp 到 256 后平均间距 24.8、最大缝隙 29.5 board units——超出测试套件里"看起来像曲线"的 12-unit 经验阈值约 2.5 倍。擦一次这种大椭圆，断面会看到明显的棱角。这与 `Rect`（完全不 clamp）的行为不一致。建议把 `MAX_SAMPLES` 提到约 1024 与 `Rect` 的实际行为对齐；未做是因为测试套件里最大的椭圆用例正好卡在 clamp 边界，没有真实触发过这个问题。位置：`board/ShapeOutline.kt`。
 - **橡皮擦每个采样点都整份拷贝文档。** `CanvasSurface.kt` 里橡皮拖拽的每个采样点都要做一次 `toMutableList` + 新建 `BoardDoc`；按 Task 19 实测的 90Hz 事件频率，就是每秒 90 次整份文档拷贝，叠加在每帧要重绘所有已提交条目之上。没有做过性能画像，不知道实际开销有多大。这跟 1a 遗留的"不跟手"问题目前**没有**已证实的关联，但如果真机上感觉擦除比画画更卡、更滞后，这是第一个该去查的地方。
-- **橡皮光标用 `scheme.error`（红色）这个颜色角色，语义上有冲突，Task 5 评审已提出但故意留到真机现场判断。** design-contract 里 `scheme.error` 是留给破坏性/失败信号用的（清空确认按钮、保存失败提示），而橡皮光标是要跟着手部持续显示一整个擦除过程的环。评审的判断：持续跟手的红环读起来像"出错了"而不是"这是橡皮擦"，还跟清空按钮撞色。如果用户在真机上觉得别扭，推荐的备选方案是用**形状**区分（比如虚线环）而不是继续占用一个语义色。位置：`content/editor/BoardDrawing.kt` 的 `drawEraserCursor`。
+- ~~橡皮光标用 `scheme.error`（红色）这个颜色角色，语义上有冲突~~ ——**已裁定，不再是待办**：Task 5 评审曾预测持续跟手的红环会读起来像"出错了"而不是"这是橡皮擦"、还跟清空按钮撞色，故意留到真机现场判断。用户在真机上完整试玩后，这个顾虑没有被验证成真，实际使用中没有反馈别扭。裁定结果：**保留 `scheme.error`**，不引入形状区分（虚线环）之类的备选方案。这条评审异议是预测性的，真实使用证据优先于预测——不要因为看到"曾经有过语义冲突的评审意见"就重新提起这个问题或改动颜色角色。位置：`content/editor/BoardDrawing.kt` 的 `drawEraserCursor`。
+- **`ShapeOutline` 的橡皮擦局部切分只保证咬到采样点，不保证咬到几何——1b-1 复审发现并打了过渡补丁，根治方案还没做。** `HitTest.strokeHit`/`shapeHit` 判定的是到连续几何（线段）的距离，`StrokeSplit.split` 删的却是离散采样点；橡皮圈扫过几何但没扫中任何采样点时，命中测试仍会 fire，切分却什么都删不掉。已知会触发这条路径的两个原因：`ShapeKind.Line` 原来只采样两个端点；轮廓采样间距是固定的画布单位常量，而橡皮半径是随缩放变化的屏幕空间常量换算过来的，高倍缩放下半径可以比采样间距还小。**已经做的过渡修法**（`board/ShapeOutline.kt`）：采样间距改成 `min(TARGET_SPACING, radiusBoard)`，永远不比当次橡皮半径更疏；`Line` 改成跟 `Rect`/`Ellipse` 一样按间距细分，不再只取端点。这堵住了目前唯一可复现的路径（形状轮廓采样 + 高倍缩放/端点附近擦除）。**根治方案是把 `StrokeSplit` 改成直接对线段切分、在几何交点处断开**，这样无论采样多稀疏都保证咬得动——这次故意不做，只做过渡修法。**残留风险**：这个过渡修法只覆盖"采样点足够密"这一个条件，理论上仍然不是万能的——如果笔迹本身采样得足够稀疏，橡皮圈依然可能扫过两个相邻采样点之间的几何却一个点都没扫中。**当前不可达**：手绘笔迹（`Stroke`）按 Task 19 实测的 90Hz 采样频率生成，单笔画采样点数中位 95、最稀也有 44 个，天然致密，不会触发这条缝——这条残留风险目前只是理论上存在，没有已知的真实复现路径。位置：`board/HitTest.kt`、`board/StrokeSplit.kt`、`board/ShapeOutline.kt`。
 
 ## 环境变量（每条 Bash 调用都要自己 export，`~/.zshrc` 不会被自动 source）
 
@@ -162,7 +163,7 @@ export JAVA_HOME='/Applications/Android Studio.app/Contents/jbr/Contents/Home'
 ```bash
 cd /Users/zohar/WorkSpace/Project/PicoProjects/SpaceWhiteboard
 export JAVA_HOME='/Applications/Android Studio.app/Contents/jbr/Contents/Home'
-./gradlew :app:testDebugUnitTest    # 89 个纯逻辑测试，board/ + store/
+./gradlew :app:testDebugUnitTest    # 90 个纯逻辑测试，board/ + store/
 ./gradlew :app:assembleDebug
 ```
 

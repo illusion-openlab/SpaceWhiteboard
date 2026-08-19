@@ -46,7 +46,8 @@ private const val MIN_SHAPE_SIZE = 4f
  * 擦除范围感觉完全不同。换算成画布单位见 [eraserRadiusBoard]。
  *
  * 取值须明显大于 MIN_STEP_PX 一节里实测的中位采样步长（6.06px），否则手指划过的路径上会
- * 漏出没擦到的缝。24px 是起始值，最终数字要在真机上装机核对手感（brief 已注明）。
+ * 漏出没擦到的缝。**24px 已经在真机 PICO Swan 上完整试玩确认**：擦除确实生效，热区大小的
+ * 手感合适，不是一个还需要现场核对的起始猜测值（详见 `AGENTS.md`「已验证的 / 未验证的」）。
  */
 private const val ERASER_RADIUS_PX = 24f
 
@@ -198,9 +199,25 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
                         // 橡皮不同：拖拽途中已经把命中对象从 doc 里即时切分掉了（见 eraseAt），
                         // 取消手势不能让这些切分变成"改过文档、却没有对应撤销记录"的既成事实——
                         // 用户看到消失/变短的笔迹已经生效，那就必须能撤销，所以取消与正常松手走同一条路径。
-                        finishEraseBatch(state, eraseBaseline, touchedBaselineIds)
-                        eraseBaseline = null
-                        eraseBaselineIds = emptySet()
+                        //
+                        // 但这条路径必须显式限定在"这次被取消的手势本身就是橡皮"（1b-1 复审发现）：
+                        // onDragCancel 不像 onDragEnd 那样天然按 style.tool 分支，如果不加这个判断，
+                        // 一旦某次手势的终止事件被上游丢掉（eraseBaseline/touchedBaselineIds 没能在
+                        // 正常路径里清空），下一次即使是完全不相关的 Pen/Shape 手势被取消，也会无条件
+                        // 把陈旧的 eraseBaseline/touchedBaselineIds 拿去记一笔 ReplaceItems——`added`
+                        // 算的是"此刻 doc 里不属于那份陈旧基准的对象"，会把陈旧基准之后新画的笔迹一起
+                        // 错记成"这次擦除产生的碎片"，撤销时连带删掉用户的新笔迹，redo 还会在
+                        // ReplaceItems.applyTo 里把它们重新插入一遍变成重复。选择在调用点加 tool 判断，
+                        // 而不是改成"每次 onDragStart 都清空橡皮 scratch 状态"，是因为现有的橡皮
+                        // onDragStart 分支本来就会用当次拖拽的 state.doc 重新整套覆盖这三个变量
+                        // （eraseBaseline/eraseBaselineIds/touchedBaselineIds.clear()），下一次真正的
+                        // 橡皮手势开始时陈旧状态自然被覆盖、不会泄漏；真正的风险只在于"非橡皮手势的
+                        // cancel 不该动用这些变量"，加在调用点最小、最直接地堵住这一条路径。
+                        if (active?.tool == Tool.Eraser) {
+                            finishEraseBatch(state, eraseBaseline, touchedBaselineIds)
+                            eraseBaseline = null
+                            eraseBaselineIds = emptySet()
+                        }
                         active = null
                         state.endGesture()
                     },
@@ -290,6 +307,12 @@ fun CanvasSurface(state: EditorState, modifier: Modifier = Modifier) {
  * 切出来的碎片，不需要（也不能）再记一次「基准对象」：它的最终形态由 doc 的终态决定，
  * 松手时按 doc 直接收集（见 finishEraseBatch），不在这里提前记账。
  *
+ * **命中不等于真的擦掉了什么**（1b-1 复审发现）：[HitTest] 判定的是到连续几何的距离，
+ * 椭圆包围盒近似在四角附近还有已知的误判区（见 `AGENTS.md` 遗留问题清单），命中完全可能
+ * 发生在橡皮圈根本没扫中任何采样点的地方。[fragmentsOf] 返回 `null` 表示这次命中是这样的
+ * 空操作——此时既不替换这个对象、不铸造新 `ItemId`，也不把它计入 [touchedBaselineIds]：
+ * 一次没有实际擦除任何东西的命中，不应该在文档里留下痕迹，也不该消耗一次撤销记录。
+ *
  * 一次采样可能同时命中多个对象：按 index 降序依次替换，保证还没处理的命中的 index
  * 不会被前面的替换改变长度而错位。
  */
@@ -302,29 +325,35 @@ private fun eraseAt(
 ) {
     val hits = HitTest.eraseHits(state.doc, p, radiusBoard)
     if (hits.isEmpty()) return
-    for (hit in hits) if (hit.item.id in baselineIds) touchedBaselineIds += hit.item.id
 
     val items = state.doc.items.toMutableList()
+    var changed = false
     for (hit in hits.sortedByDescending { it.index }) {
-        val fragments = fragmentsOf(state, hit.item, p, radiusBoard)
+        val fragments = fragmentsOf(state, hit.item, p, radiusBoard) ?: continue
         items.removeAt(hit.index)
         items.addAll(hit.index, fragments)
+        if (hit.item.id in baselineIds) touchedBaselineIds += hit.item.id
+        changed = true
     }
-    state.setDocWithoutUndo(BoardDoc(items))
+    if (changed) state.setDocWithoutUndo(BoardDoc(items))
 }
 
-/** 把一个命中对象在 [center]/[radiusBoard] 处切开，产出存活段构成的 Stroke 碎片列表。 */
-private fun fragmentsOf(state: EditorState, item: Item, center: Pt, radiusBoard: Float): List<Stroke> {
+/**
+ * 把一个命中对象在 [center]/[radiusBoard] 处切开，产出存活段构成的 Stroke 碎片列表；
+ * 若 [StrokeSplit.split] 只切出一段、且这一段的长度等于输入点数（即没有任何点被删除），
+ * 说明这是一次没有实际擦除效果的空命中，返回 `null` 让调用方原样跳过这个对象。
+ */
+private fun fragmentsOf(state: EditorState, item: Item, center: Pt, radiusBoard: Float): List<Stroke>? {
     val points: List<Pt>
     val colorArgb: Int
     val widthDp: Float
     when (item) {
         is Stroke -> { points = item.points; colorArgb = item.colorArgb; widthDp = item.widthDp }
-        is ShapeItem -> { points = ShapeOutline.toPoints(item); colorArgb = item.colorArgb; widthDp = item.widthDp }
+        is ShapeItem -> { points = ShapeOutline.toPoints(item, radiusBoard); colorArgb = item.colorArgb; widthDp = item.widthDp }
     }
-    return StrokeSplit.split(points, center, radiusBoard).map { pts ->
-        Stroke(state.newId(), colorArgb, widthDp, pts)
-    }
+    val runs = StrokeSplit.split(points, center, radiusBoard)
+    if (runs.size == 1 && runs[0].size == points.size) return null
+    return runs.map { pts -> Stroke(state.newId(), colorArgb, widthDp, pts) }
 }
 
 /**
